@@ -447,48 +447,6 @@ static const struct file_operations dicedev_buffer_fops = {
 };
 
 
-static struct file *dicedev_create_buffer(struct dicedev_context *ctx, int size, uint64_t allowed)
-{
-	struct dicedev_buffer *buff;
-
-	if (size < 0 || size > DICEDEV_MAX_BUFF_SIZE) {
-		printk(KERN_ERR "dicedev_create_buffer: size too big\n");
-		return ERR_PTR(-EINVAL);
-	}
-
-	if (allowed > DICEDEV_MAX_ALLOWED) {
-		printk(KERN_ERR "dicedev_create_buffer: invalid allowed flag\n");
-		return ERR_PTR(-EINVAL);
-	}
-
-	buff = kzalloc(sizeof(struct dicedev_buffer), GFP_KERNEL);
-
-	if (!buff) {
-		goto err;
-	}
-
-	if (dicedev_pt_create(ctx->dev->pdev, buff->pt, size) < 0) {
-		goto err_free_buff;
-	}
-
-	buff->ctx = ctx;
-	buff->binded_slot = DICEDEV_BUFFER_NO_SLOT;
-	buff->seed = DICEDEV_DEFAULT_SEED;
-	buff->allowed = allowed;
-	INIT_LIST_HEAD(&buff->context_buffers);
-
-	list_add(&buff->context_buffers, &ctx->allocated_buffers);
-
-	// TODO: check the flags.
-	return anon_inode_getfile("dicedev_buffer", &dicedev_buffer_fops, buff, O_RDWR | O_CLOEXEC);
-
-err_free_buff:
-	kfree(buff);
-err:
-	return ERR_PTR(-ENOMEM);
-}
-
-
 static void dicedev_task_init_iterator(struct dicedev_task *task)
 {
 	task->cBuff_state.curr_pg_no = task->offset / PAGE_SIZE;
@@ -625,15 +583,60 @@ static int dicedev_ioctl_seed_inc(struct dicedev_context *ctx, uint32_t inc) {
 	return 0;
 }
 
+static long dicedev_ioctl_create_set(struct dicedev_context *ctx, unsigned long arg) {
+	char __user *argp = (char __user *)arg;
+	struct dicedev_ioctl_create_set cs;
+	struct dicedev_buffer *buff;
+
+	if (copy_from_user(&cs, argp, sizeof(struct dicedev_ioctl_create_set))) {
+		printk(KERN_ERR "dicedev_ioctl_create_set: failed to copy from user\n");
+		return -EFAULT;
+	}
+
+	if (cs.size < 0 || cs.size > DICEDEV_MAX_BUFF_SIZE) {
+		printk(KERN_ERR "dicedev_create_buffer: size too big\n");
+		return -EINVAL;
+	}
+
+	if (cs.allowed > DICEDEV_MAX_ALLOWED) {
+		printk(KERN_ERR "dicedev_create_buffer: invalid allowed flag\n");
+		return -EINVAL;
+	}
+
+	buff = kzalloc(sizeof(struct dicedev_buffer), GFP_KERNEL);
+
+	if (!buff) {
+		goto err;
+	}
+
+	if (dicedev_pt_create(ctx->dev->pdev, buff->pt, cs.size) < 0) {
+		goto err_free_buff;
+	}
+
+	buff->ctx = ctx;
+	buff->binded_slot = DICEDEV_BUFFER_NO_SLOT;
+	buff->seed = DICEDEV_DEFAULT_SEED;
+	buff->allowed = cs.allowed;
+	INIT_LIST_HEAD(&buff->context_buffers);
+
+	list_add(&buff->context_buffers, &ctx->allocated_buffers);
+
+	// TODO: check the flags.
+	return anon_inode_getfd("dicedev_buffer", &dicedev_buffer_fops, buff, O_RDWR | O_CLOEXEC);
+
+err_free_buff:
+	kfree(buff);
+err:
+	return -ENOMEM;
+}
+
 
 static long dicedev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	struct dicedev_context *ctx = filp->private_data;
-	struct dicedev_ioctl_create_set *cs;
 	struct dicedev_ioctl_run *rCmd;
 	struct dicedev_ioctl_wait *wCmd;
-	struct dicedev_ioctl_seed_inc *siCmd;
-	struct file *f;
+	struct dicedev_ioctl_seed_increment *siCmd;
 
 	if (!ctx) {
 		printk(KERN_ERR "dicedev_ioctl: invalid context\n");
@@ -641,21 +644,8 @@ static long dicedev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg
 	}
 
 	switch (cmd) {
-	case DICEDEV_IOCTL_CREATE_SET: ;
-		cs = (struct dicedev_ioctl_create_set *)arg;
-
-		if (!cs) {
-			printk(KERN_ERR "dicedev_ioctl: invalid argument\n");
-			return -EINVAL;
-		}
-
-		f = dicedev_create_buffer(ctx, cs->size, cs->allowed);
-
-		if (IS_ERR(f)) {
-			return PTR_ERR(f);
-		}
-
-		return (long) f;
+	case DICEDEV_IOCTL_CREATE_SET:
+		return dicedev_ioctl_create_set(ctx, arg);
 
 	case DICEDEV_IOCTL_RUN:
 		rCmd = (struct dicedev_ioctl_run *) arg;
