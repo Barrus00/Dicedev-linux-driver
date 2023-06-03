@@ -2,12 +2,13 @@
 #include <linux/dma-mapping.h>
 #include <linux/types.h>
 
+#include "dicedev.h"
+
 #include "dicedev_pt.h"
 
 #define DICEDEV_PT_PREFIX "[dicedev_pt] "
 
 #define PAGE_SIZE_BITS 12
-#define DICEDEV_PAGE_SIZE (1 << PAGE_SIZE_BITS)
 
 #define IS_PAGE_ALIGNED(x) (((x) & (DICEDEV_PAGE_SIZE - 1)) == 0)
 
@@ -15,7 +16,7 @@
 #define PRESENT(x) ((x) & PRESENT_MASK)
 #define PA_MASK 0xFFFFFFF0 // TODO: check if this is correct for little endian
 
-#define MAKE_PT_ENTRY(addr) (0x1 | ((addr) >> 4))
+#define MAKE_PT_ENTRY(addr) (0x1 | ((addr) >> 8))
 
 
 typedef uint32_t page_entry_t;
@@ -63,9 +64,10 @@ int dicedev_pt_create(struct pci_dev *pdev, struct dicedev_page_table *page_tabl
 		return -1; // TODO: error code
 	}
 
-	num_pages = (size + DICEDEV_PAGE_SIZE - 1) >> PAGE_SIZE_BITS;
+	num_pages = (size + DICEDEV_PAGE_SIZE - 1) / DICEDEV_PAGE_SIZE;
 	page_entries = (page_entry_t *)page_table->pt.page;
 	page_table->max_size = size;
+	page_table->num_pages = num_pages;
 
 	if (!(page_table->pages = kzalloc(sizeof(struct dicedev_page) * num_pages, GFP_KERNEL))) {
 		printk(KERN_ERR "dicedev_pt_create: kmalloc failed\n");
@@ -113,7 +115,7 @@ void dicedev_pt_free(struct pci_dev *pdev, struct dicedev_page_table *page_table
 
 	for (i = 0; i < page_table->num_pages; i++) {
 		if (PRESENT(page_entries[i])) {
-			page_free(pdev, page_table->pages[i].page);
+			page_free(pdev, &page_table->pages[i]);
 		} else {
 			break;
 		}

@@ -92,7 +92,7 @@ struct dicedev_context {
 	struct dicedev_device *dev;
 	spinlock_t slock;
 	bool failed;
-	size_t running_tasks_no;
+	size_t task_count;
 	wait_queue_head_t wq;
 	struct list_head allocated_buffers;
 	struct list_head other_contexts;
@@ -140,7 +140,7 @@ static void inline feed_cmd(struct dicedev_device *dev, uint32_t *cmd, size_t cm
 			// Wait for free slot.
 		}
 
-		dicedev_iow(dev, CMD_MANUAL_FREE, cmd[i]);
+		dicedev_iow(dev, CMD_MANUAL_FEED, cmd[i]);
 	}
 }
 
@@ -193,13 +193,15 @@ static irqreturn_t dicedev_isr(int irq, void *opaque)
 
 	spin_lock_irqsave(&dev->slock, flags);
 	istatus = dicedev_ior(dev, DICEDEV_INTR) & dicedev_ior(dev, DICEDEV_INTR_ENABLE);
-
+	printk(KERN_ERR "dicedev_isr: IRQ1: %x\n", istatus);
 	if (istatus) {
+		printk(KERN_ERR "dicedev_isr: IRQ2: %x\n", istatus);
 		dicedev_iow(dev, DICEDEV_INTR, istatus);
 
 		if (istatus & DICEDEV_INTR_FENCE_WAIT) {
 			struct list_head *lh;
 			struct dicedev_task *task;
+			printk(KERN_ERR "dicedev: TASK DONE!\n");
 
 			BUG_ON(list_empty(&dev->wt.running_tasks));
 
@@ -207,7 +209,7 @@ static irqreturn_t dicedev_isr(int irq, void *opaque)
 			list_del(lh);
 			task = container_of(lh, struct dicedev_task, lh);
 
-			task->ctx->running_tasks_no--;
+			task->ctx->task_count--;
 			wake_up_interruptible(&task->ctx->wq);
 
 			unbind_slot(dev, task->dBuff);
@@ -270,7 +272,7 @@ static int dicedev_release(struct inode *inode, struct file *filp)
 {
 	struct dicedev_context *ctx = filp->private_data;
 	struct dicedev_device *dev = ctx->dev;
-	struct list_head *lh;
+	struct list_head *lh, *tmp;
 	unsigned long flags;
 
 	list_for_each(lh, &ctx->allocated_buffers) {
@@ -281,18 +283,24 @@ static int dicedev_release(struct inode *inode, struct file *filp)
 		spin_unlock_irqrestore(&dev->slock, flags);
 	}
 
+	printk(KERN_ERR "dicedev_release: waiting for tasks to finish\n");
+
 	spin_lock_irqsave(&dev->slock, flags);
 
-	while (ctx->running_tasks_no > 0) {
+	while (ctx->task_count > 0) {
 		spin_unlock_irqrestore(&dev->slock, flags);
-		wait_event_interruptible(ctx->wq, ctx->running_tasks_no == 0);
+		wait_event_interruptible(ctx->wq, ctx->task_count == 0);
 		spin_lock_irqsave(&dev->slock, flags);
 	}
 
 	spin_unlock_irqrestore(&dev->slock, flags);
 
-	list_for_each(lh, &ctx->allocated_buffers) {
+	printk(KERN_ERR "dicedev_release: all tasks finished\n");
+
+	list_for_each_safe(lh, tmp, &ctx->allocated_buffers) {
 		struct dicedev_buffer *buff = container_of(lh, struct dicedev_buffer, context_buffers);
+
+		printk(KERN_ERR "dicedev_release: freeing buffer");
 
 		spin_lock_irqsave(&dev->slock, flags);
 
@@ -302,15 +310,25 @@ static int dicedev_release(struct inode *inode, struct file *filp)
 			spin_lock_irqsave(&dev->slock, flags);
 		}
 
+		spin_unlock_irqrestore(&dev->slock, flags);
+
+		printk(KERN_ERR "dicedev_release: buffer no usage found\n");
+
 		if (buff->binded_slot != DICEDEV_BUFFER_NO_SLOT) {
 			unbind_slot(dev, buff);
 		}
 
-		dicedev_pt_free(dev->pdev, buff->pt);
-		kfree(buff);
 
-		spin_unlock_irqrestore(&dev->slock, flags);
+		printk(KERN_ERR "dicedev_release: buffer unbinded\n");
+
+		dicedev_pt_free(dev->pdev, buff->pt);
+
+				printk(KERN_ERR "dicedev_release: buffer ssfreed\n");
+		list_del(lh);
+		kfree(buff);
+		printk(KERN_ERR "dicedev_release: buffer freed\n");
 	}
+	printk(KERN_ERR "dicedev_release: all buffers freed\n");
 
 	kfree(ctx);
 
@@ -324,7 +342,10 @@ static vm_fault_t dicedev_buffer_fault(struct vm_fault *vmf) {
 	struct dicedev_buffer *buff = vma->vm_private_data;
 	struct page *page;
 
-	if (vmf->pgoff > buff->pt->num_pages) {
+	printk(KERN_ERR "dicedev_buffer_fault: pgoff: %lu\n", vmf->pgoff);
+	printk(KERN_ERR "dicedev_buffer_fault: num_pages: %lu\n", buff->pt->num_pages);
+	if (vmf->pgoff >= buff->pt->num_pages) {
+		printk(KERN_ERR "dicedev_buffer_fault: pgoff out of range\n");
 		return VM_FAULT_SIGBUS;
 	}
 
@@ -345,11 +366,17 @@ static struct vm_operations_struct dicedev_buffer_vms = {
 static int dicedev_buffer_mmap(struct file *filp, struct vm_area_struct *vma) {
 	struct dicedev_buffer *buff = filp->private_data;
 
+	if (buff == NULL) {
+		printk(KERN_ERR "dicedev_buffer_mmap: buffer is NULL\n");
+		return -EINVAL;
+	}
+
 	vma->vm_private_data = buff;
 	vma->vm_ops = &dicedev_buffer_vms;
 
 	return 0;
 }
+
 
 static ssize_t dicedev_buffer_read(struct file *filp, char __user *buff, size_t count, loff_t *offp) {
 	/* FIXME: add read support */
@@ -415,7 +442,8 @@ static ssize_t dicedev_buffer_write(struct file *filp, const char __user *buf, s
 
 static long dicedev_buffer_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 	struct dicedev_buffer *buff = filp->private_data;
-	struct dicedev_ioctl_seed *sCmd;
+	struct dicedev_ioctl_seed sCmd;
+	char __user *user_buff;
 
 	if (!buff) {
 		return -EINVAL;
@@ -423,14 +451,18 @@ static long dicedev_buffer_ioctl(struct file *filp, unsigned int cmd, unsigned l
 
 	switch (cmd) {
 	case DICEDEV_BUFFER_IOCTL_SEED:
-		sCmd = (struct dicedev_ioctl_seed *) arg;
+		user_buff = (char __user *) arg;
 
-		if (!sCmd) {
-			return -EINVAL;
+		printk(KERN_ERR "dicedev_buffer_ioctl: seed: %lu\n", buff->seed);
+
+		if (copy_from_user(&sCmd, user_buff, sizeof(struct dicedev_ioctl_seed))) {
+			return -EFAULT;
 		}
 
 		buff->seed_chg = 1;
-		buff->seed = sCmd->seed;
+		buff->seed = sCmd.seed;
+
+		printk(KERN_ERR "dicedev_buffer_ioctl: seed: %lu\n", buff->seed);
 
 		return 0;
 	default:
@@ -491,17 +523,85 @@ static int get_slot(struct dicedev_device *dev)
 
 static void __add_task(struct dicedev_device *dev, struct dicedev_task *task)
 {
-	spin_lock(&dev->slock);
+	unsigned long flags;
+
+	spin_lock_irqsave(&dev->slock, flags);
 	list_add_tail(&task->lh, &dev->wt.pending_tasks);
+	printk(KERN_ERR "dicedev__add_task: waking up with %p\n", task);
 	wake_up_interruptible(&dev->wt.task_cond);
-	spin_unlock(&dev->slock);
+	spin_unlock_irqrestore(&dev->slock, flags);
 }
 
 
-static int dicedev_ioctl_run(struct dicedev_context *ctx, struct dicedev_ioctl_run rCmd) {
+static long dicedev_ioctl_create_set(struct dicedev_context *ctx, unsigned long arg) {
+	char __user *argp = (char __user *)arg;
+	struct dicedev_ioctl_create_set cs;
+	struct dicedev_buffer *buff;
+
+	if (copy_from_user(&cs, argp, sizeof(struct dicedev_ioctl_create_set))) {
+		printk(KERN_ERR "dicedev_ioctl_create_set: failed to copy from user\n");
+		return -EFAULT;
+	}
+
+	if (cs.size < 0 || cs.size > DICEDEV_MAX_BUFF_SIZE) {
+		printk(KERN_ERR "dicedev_create_buffer: size too big\n");
+		return -EINVAL;
+	}
+
+	printk(KERN_ERR "dicedev_ioctl_create_set: size: %d\n", cs.size);
+
+	if (cs.allowed > DICEDEV_MAX_ALLOWED) {
+		printk(KERN_ERR "dicedev_create_buffer: invalid allowed flag\n");
+		return -EINVAL;
+	}
+
+	buff = kzalloc(sizeof(struct dicedev_buffer), GFP_KERNEL);
+
+	if (!buff) {
+		goto err;
+	}
+
+	buff->pt = kzalloc(sizeof(struct dicedev_page_table), GFP_KERNEL);
+
+	if (!buff->pt) {
+		goto err_free_buff;
+	}
+
+	if (dicedev_pt_create(ctx->dev->pdev, buff->pt, cs.size) < 0) {
+		goto err_pt_init;
+	}
+
+	buff->ctx = ctx;
+	buff->binded_slot = DICEDEV_BUFFER_NO_SLOT;
+	buff->seed = DICEDEV_DEFAULT_SEED;
+	buff->allowed = cs.allowed;
+	INIT_LIST_HEAD(&buff->context_buffers);
+
+	list_add(&buff->context_buffers, &ctx->allocated_buffers);
+
+	// TODO: check the flags.
+	return anon_inode_getfd("dicedev_buffer", &dicedev_buffer_fops, buff, O_RDWR | O_CLOEXEC);
+
+err_pt_init:
+	kfree(buff->pt);
+err_free_buff:
+	kfree(buff);
+err:
+	return -ENOMEM;
+}
+
+
+static long dicedev_ioctl_run(struct dicedev_context *ctx, unsigned long arg) {
+	char __user *argp = (char __user *)arg;
+	struct dicedev_ioctl_run rCmd;
 	struct dicedev_buffer *cBuff, *dBuff;
 	struct dicedev_device *dev;
 	struct dicedev_task *task;
+	unsigned long flags;
+
+	if (copy_from_user(&rCmd, argp, sizeof(struct dicedev_ioctl_run))) {
+		return -EFAULT;
+	}
 
 	if (rCmd.addr % 4 !=  0 || rCmd.size % 4 != 0) {
 		printk(KERN_ERR "dicedev_ioctl_run: invalid addr or size\n");
@@ -527,13 +627,9 @@ static int dicedev_ioctl_run(struct dicedev_context *ctx, struct dicedev_ioctl_r
 		return -EINVAL;
 	}
 
-	//TODO: maybe we dont need this.
-	spin_lock(&dev->slock);
 	if (ctx->failed) {
-		spin_unlock(&dev->slock);
 		return -EIO;
 	}
-	spin_unlock(&dev->slock);
 
 	task = kzalloc(sizeof(struct dicedev_task), GFP_KERNEL);
 
@@ -541,26 +637,66 @@ static int dicedev_ioctl_run(struct dicedev_context *ctx, struct dicedev_ioctl_r
 		return -ENOMEM;
 	}
 
+	spin_lock_irqsave(&dev->slock, flags);
+	ctx->task_count++;
+	spin_unlock_irqrestore(&dev->slock, flags);
+
+	task->ctx = ctx;
+	task->cBuff = cBuff;
+	task->dBuff = dBuff;
+	task->size = rCmd.size;
+	task->offset = rCmd.addr;
+	INIT_LIST_HEAD(&task->lh);
+
+	printk(KERN_ERR "dicedev_ioctl_run: adding task,........ %p\n", task);
 	__add_task(dev, task);
+	printk(KERN_ERR "dicedev_ioctl_run: added task! %p\n", task);
+	return 0;
+}
+
+
+static long dicedev_ioctl_wait(struct dicedev_context *ctx, unsigned long arg) {
+	char __user *argp = (char __user *)arg;
+	struct dicedev_ioctl_wait wCmd;
+	struct dicedev_device *dev;
+	unsigned long flags;
+
+	if (copy_from_user(&wCmd, argp, sizeof(struct dicedev_ioctl_wait))) {
+		return -EFAULT;
+	}
+
+	dev = ctx->dev;
+
+	spin_lock_irqsave(&dev->slock, flags);
+	while (wCmd.cnt < ctx->task_count) {
+		spin_unlock_irqrestore(&dev->slock, flags);
+		wait_event_interruptible(ctx->wq, wCmd.cnt >= ctx->task_count);
+		spin_lock_irqsave(&dev->slock, flags);
+	}
+
+	if (ctx->failed) {
+		spin_unlock_irqrestore(&dev->slock, flags);
+		return -EIO;
+	}
+
+	spin_unlock_irqrestore(&dev->slock, flags);
 
 	return 0;
 }
 
 
-static int dicedev_ioctl_wait(struct dicedev_context *ctx, struct dicedev_ioctl_wait *wCmd) {
+static long dicedev_ioctl_seed_increment(struct dicedev_context *ctx, unsigned long arg) {
+	char __user *argp = (char __user *)arg;
+	struct dicedev_ioctl_seed_increment siCmd;
 	unsigned long flags;
 
-	spin_lock_irqsave(&ctx->dev->slock, flags);
-	while (wCmd->cnt >= ctx->running_tasks_no) {
-		spin_unlock_irqrestore(&ctx->dev->slock, flags);
-		wait_event_interruptible(ctx->wq, wCmd->cnt >= ctx->running_tasks_no);
-		spin_lock_irqsave(&ctx->wq.lock, flags);
+	if (copy_from_user(&siCmd, argp, sizeof(struct dicedev_ioctl_seed_increment))) {
+		return -EFAULT;
 	}
 
-	if (ctx->failed) {
-		spin_unlock_irqrestore(&ctx->dev->slock, flags);
-		return -EIO;
-	}
+	spin_lock_irqsave(&ctx->dev->slock, flags);
+
+	dicedev_iow(ctx->dev, DICEDEV_INCREMENT_SEED, siCmd.enable_increment);
 
 	spin_unlock_irqrestore(&ctx->dev->slock, flags);
 
@@ -568,75 +704,9 @@ static int dicedev_ioctl_wait(struct dicedev_context *ctx, struct dicedev_ioctl_
 }
 
 
-static int dicedev_ioctl_seed_inc(struct dicedev_context *ctx, uint32_t inc) {
-	if (inc != 0 && inc != 1) {
-		printk(KERN_ERR "dicedev_ioctl_seed_inc: invalid increment value\n");
-		return -EINVAL;
-	}
-
-	spin_lock(&ctx->dev->slock);
-
-	dicedev_iow(ctx->dev, DICEDEV_INCREMENT_SEED, inc);
-
-	spin_unlock(&ctx->dev->slock);
-
-	return 0;
-}
-
-static long dicedev_ioctl_create_set(struct dicedev_context *ctx, unsigned long arg) {
-	char __user *argp = (char __user *)arg;
-	struct dicedev_ioctl_create_set cs;
-	struct dicedev_buffer *buff;
-
-	if (copy_from_user(&cs, argp, sizeof(struct dicedev_ioctl_create_set))) {
-		printk(KERN_ERR "dicedev_ioctl_create_set: failed to copy from user\n");
-		return -EFAULT;
-	}
-
-	if (cs.size < 0 || cs.size > DICEDEV_MAX_BUFF_SIZE) {
-		printk(KERN_ERR "dicedev_create_buffer: size too big\n");
-		return -EINVAL;
-	}
-
-	if (cs.allowed > DICEDEV_MAX_ALLOWED) {
-		printk(KERN_ERR "dicedev_create_buffer: invalid allowed flag\n");
-		return -EINVAL;
-	}
-
-	buff = kzalloc(sizeof(struct dicedev_buffer), GFP_KERNEL);
-
-	if (!buff) {
-		goto err;
-	}
-
-	if (dicedev_pt_create(ctx->dev->pdev, buff->pt, cs.size) < 0) {
-		goto err_free_buff;
-	}
-
-	buff->ctx = ctx;
-	buff->binded_slot = DICEDEV_BUFFER_NO_SLOT;
-	buff->seed = DICEDEV_DEFAULT_SEED;
-	buff->allowed = cs.allowed;
-	INIT_LIST_HEAD(&buff->context_buffers);
-
-	list_add(&buff->context_buffers, &ctx->allocated_buffers);
-
-	// TODO: check the flags.
-	return anon_inode_getfd("dicedev_buffer", &dicedev_buffer_fops, buff, O_RDWR | O_CLOEXEC);
-
-err_free_buff:
-	kfree(buff);
-err:
-	return -ENOMEM;
-}
-
-
 static long dicedev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	struct dicedev_context *ctx = filp->private_data;
-	struct dicedev_ioctl_run *rCmd;
-	struct dicedev_ioctl_wait *wCmd;
-	struct dicedev_ioctl_seed_increment *siCmd;
 
 	if (!ctx) {
 		printk(KERN_ERR "dicedev_ioctl: invalid context\n");
@@ -648,34 +718,14 @@ static long dicedev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg
 		return dicedev_ioctl_create_set(ctx, arg);
 
 	case DICEDEV_IOCTL_RUN:
-		rCmd = (struct dicedev_ioctl_run *) arg;
-
-		if (!rCmd) {
-			printk(KERN_ERR "dicedev_ioctl: invalid argument\n");
-			return -EINVAL;
-		}
-
-		return dicedev_ioctl_run(ctx, *rCmd);
+		return dicedev_ioctl_run(ctx, arg);
 
 	case DICEDEV_IOCTL_WAIT:
-		wCmd = (struct dicedev_ioctl_wait *) arg;
-
-		if (!wCmd) {
-			printk(KERN_ERR "dicedev_ioctl: invalid argument\n");
-			return -EINVAL;
-		}
-
-		return dicedev_ioctl_wait(ctx, wCmd);
+		return dicedev_ioctl_wait(ctx, arg);
 
 	case DICEDEV_IOCTL_ENABLE_SEED_INCREMENT:
-		siCmd = (struct dicedev_ioctl_seed_increment *) arg;
+		return dicedev_ioctl_seed_increment(ctx, arg);
 
-		if (!siCmd) {
-			printk(KERN_ERR "dicedev_ioctl: invalid argument\n");
-			return -EINVAL;
-		}
-
-		return dicedev_ioctl_seed_inc(ctx, siCmd->enable_increment);
 	default:
 		printk(KERN_ERR "dicedev_ioctl: invalid command\n");
 		return -EINVAL;
@@ -698,10 +748,13 @@ static void __wt_run_task(struct dicedev_task *task) {
 	struct dicedev_device *dev = ctx->dev;
 	struct dicedev_buffer *data_buffer = task->dBuff;
 	uint32_t cmd[2];
+	unsigned long flags;
 
-	spin_lock(&task->ctx->dev->slock);
+	printk(KERN_ERR "dicedev_thread_fn: task running %p\n", task);
+
+	spin_lock_irqsave(&task->ctx->dev->slock, flags);
 	list_add_tail(&task->lh, &task->ctx->dev->wt.running_tasks);
-	spin_unlock(&task->ctx->dev->slock);
+	spin_unlock_irqrestore(&task->ctx->dev->slock, flags);
 
 	BUG_ON(data_buffer->binded_slot == DICEDEV_BUFFER_NO_SLOT);
 
@@ -714,6 +767,7 @@ static void __wt_run_task(struct dicedev_task *task) {
 			case DICEDEV_USER_CMD_TYPE_NOP:
 				break;
 			case DICEDEV_USER_CMD_TYPE_GET_DIE:
+				printk(KERN_ERR "dicedev_thread_fn: GET_DIE\n");
 				if (task->cBuff_state.bytes_left < 4) {
 					goto err_ctx_fail;
 				}
@@ -730,6 +784,7 @@ static void __wt_run_task(struct dicedev_task *task) {
 
 				break;
 			case DICEDEV_USER_CMD_TYPE_NEW_SET:
+				printk(KERN_ERR "dicedev_thread_fn: NEW_SET\n");
 				if ((cmd[0] & NEW_SET_SLOT_MASK) != 0) {
 					goto err_ctx_fail;
 				}
@@ -743,6 +798,7 @@ static void __wt_run_task(struct dicedev_task *task) {
 				goto err_ctx_fail;
 		}
 	}
+	printk(KERN_ERR "dicedev_thread_fn: DONE SENDING\n");
 
 	cmd[0] =  DICEDEV_USER_CMD_FENCE_HEADER(DICEDEV_FENCE_DONE_NUM);
 
@@ -764,33 +820,38 @@ static int dicedev_work_thread_fn(void *data) {
 	struct dicedev_device *dev = data;
 	struct dicedev_task *task;
 	struct list_head *task_lh;
+	unsigned long flags;
 
 	while (dev->wt.running) {
-		spin_lock(&dev->slock);
+		spin_lock_irqsave(&dev->slock, flags);
 
-		if (list_empty(&dev->wt.pending_tasks)) {
-			spin_unlock(&dev->slock);
+		while (list_empty(&dev->wt.pending_tasks)) {
+			spin_unlock_irqrestore(&dev->slock, flags);
+			printk(KERN_ERR "dicedev_work_thread_fn: waiting for task\n");
 			wait_event_interruptible(dev->wt.task_cond, !list_empty(&dev->wt.pending_tasks));
-			spin_lock(&dev->slock);
+			printk(KERN_ERR "dicedev_work_thread_fn: got task!\n");
+			spin_lock_irqsave(&dev->slock, flags);
 		}
 
 		task_lh = dev->wt.pending_tasks.next;
 		list_del(task_lh);
 		task = container_of(task_lh, struct dicedev_task, lh);
 
+		printk(KERN_ERR "dicedev_work_thread_fn: task %d\n", (int)task->size);
 
 		while (dev->free_slots == 0 && task->dBuff->binded_slot == DICEDEV_BUFFER_NO_SLOT) {
-			spin_unlock(&dev->slock);
+			spin_unlock_irqrestore(&dev->slock, flags);
 			wait_event_interruptible(dev->wt.slot_cond, dev->free_slots > 0);
-			spin_lock(&dev->slock);
+			spin_lock_irqsave(&dev->slock, flags);
 		}
 
 		if (task->dBuff->binded_slot == DICEDEV_BUFFER_NO_SLOT) {
-			dev->free_slots--;
 			bind_slot(dev, task->dBuff, get_slot(dev));
 		}
 
-		spin_unlock(&dev->slock);
+		printk(KERN_ERR "dicedev_work_thread_fn: slot %d\n", (int)task->dBuff->binded_slot);
+
+		spin_unlock_irqrestore(&dev->slock, flags);
 
 		__wt_run_task(task);
 	}
@@ -824,16 +885,21 @@ static int dicedev_probe(struct pci_dev *pdev, const struct pci_device_id *pci_i
 				      | DICEDEV_INTR_CMD_ERROR
 				      | DICEDEV_INTR_MEM_ERROR
 				      | DICEDEV_INTR_SLOT_ERROR;
+
 	/* Allocate device structure */
 	struct dicedev_device *dev = kzalloc(sizeof(struct dicedev_device), GFP_KERNEL);
 	if (!dev) {
 		err = -ENOMEM;
 		goto err_alloc_dev;
 	}
+
 	pci_set_drvdata(pdev, dev);
 	dev->pdev = pdev;
 
 	spin_lock_init(&dev->slock);
+	init_waitqueue_head(&dev->slot_wq);
+	dev->free_slots = DICEDEV_NUM_SLOTS;
+
 	mutex_lock(&dicedev_devices_lock);
 	for (i = 0; i < DICEDEV_MAX_DEVICES; i++) {
 		if (!dicedev_devices[i]) {
@@ -876,10 +942,10 @@ static int dicedev_probe(struct pci_dev *pdev, const struct pci_device_id *pci_i
 
 	dicedev_init_wt(dev);
 
+	dicedev_iow(dev, DICEDEV_ENABLE, 1);
 	dicedev_iow(dev, DICEDEV_INTR, enabled_intr);
 	dicedev_iow(dev, DICEDEV_INTR_ENABLE, enabled_intr);
-
-
+	dicedev_iow(dev, DICEDEV_CMD_FENCE_WAIT, DICEDEV_FENCE_DONE_NUM);
 
 	cdev_init(&dev->cdev, &dicedev_file_ops);
 
