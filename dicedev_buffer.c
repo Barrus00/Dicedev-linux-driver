@@ -3,47 +3,6 @@
 
 #include "dicedev_buffer.h"
 
-int dicedev_buffer_init(struct dicedev_context *ctx,
-			struct dicedev_buffer *buff,
-			size_t size,
-			uint64_t allowed) {
-	int err;
-	BUG_ON(!ctx);
-	BUG_ON(!buff);
-
-	buff->pt = kzalloc(sizeof(struct dicedev_page_table), GFP_KERNEL);
-
-	if (!buff->pt) {
-		printk(KERN_ERR "dicedev_buffer_init: failed to allocate page table\n");
-		err = -ENOMEM;
-		goto error;
-	}
-
-	if (dicedev_pt_init(ctx->dev->pdev, buff->pt, size) <  0) {
-		printk(KERN_ERR "dicedev_buffer_init: failed to initialize page table\n");
-		err = -ENOMEM;
-		goto err_pt;
-	}
-
-	buff->ctx = ctx;
-	INIT_LIST_HEAD(&buff->context_buffers);
-	buff->destroyed = 0;
-	buff->seed = DICEDEV_DEFAULT_SEED;
-	buff->seed_chg = 0;
-	buff->allowed = allowed;
-	buff->binded_slot = DICEDEV_BUFFER_NO_SLOT;
-
-	buff->reader.result_count = 0;
-	buff->reader.offset = 0;
-
-	return 0;
-
-err_pt:
-	kfree(buff->pt);
-error:
-	return err;
-}
-
 
 void dicedev_buffer_init_reader(struct dicedev_buffer *buff) {
 	BUG_ON(!buff);
@@ -95,39 +54,53 @@ static int dicedev_buffer_mmap(struct file *filp, struct vm_area_struct *vma) {
 static ssize_t dicedev_buffer_write(struct file *filp, const char __user *buf, size_t count, loff_t *f_pos)
 {
 	struct dicedev_buffer *buff = filp->private_data;
-	struct dicedev_context *ctx = buff->ctx;
+	struct dicedev_context *ctx;
+	ssize_t err;
 	struct dicedev_task *task;
 	uint32_t *cmd;
 	unsigned long flags;
 
 	if (count % 4 != 0) {
-		printk(KERN_ERR "dicedev_buffer_write: count is not a multiple of 4\n");
-		return -EINVAL;
+		err = -EINVAL;
+		goto err;
 	}
+
+	spin_lock_irqsave(&buff->dev->slock, flags);
+	if (buff->destroyed) {
+		spin_unlock_irqrestore(&buff->dev->slock, flags);
+		err = -EPERM;
+		goto err;
+	}
+
+	spin_lock_irqsave(&buff->ctx->slock, flags);
+	spin_unlock_irqrestore(&buff->dev->slock, flags);
+	ctx = buff->ctx;
+	ctx->task_count++;
+	spin_unlock_irqrestore(&buff->ctx->slock, flags);
+
 
 	cmd = kmalloc(count, GFP_KERNEL);
 
 	if (!cmd) {
-		printk(KERN_ERR "dicedev_buffer_write: failed to allocate memory\n");
-		return -ENOMEM;
+		err = -ENOMEM;
+		goto err_task;
+//		printk(KERN_ERR "dicedev_buffer_write: failed to allocate memory\n");
 	}
 
 	if (copy_from_user(cmd, buf, count)) {
-		printk(KERN_ERR "dicedev_buffer_write: failed to copy from user\n");
-		return -EFAULT;
+		err = -EFAULT;
+		goto err_copy;
+//		printk(KERN_ERR "dicedev_buffer_write: failed to copy from user\n");
 	}
 
 	task = kmalloc(sizeof(struct dicedev_task), GFP_KERNEL);
 
 	if (!task) {
-		kfree(cmd);
-		printk(KERN_ERR "dicedev_buffer_write: failed to allocate memory\n");
-		return -ENOMEM;
+		err = -ENOMEM;
+		goto err_copy;
+//		printk(KERN_ERR "dicedev_buffer_write: failed to allocate memory\n");
 	}
 
-	spin_lock_irqsave(&ctx->slock, flags);
-	ctx->task_count++;
-	spin_unlock_irqrestore(&ctx->slock, flags);
 
 	task->type = DICEDEV_TASK_TYPE_WRITE;
 	task->ctx = ctx;
@@ -141,13 +114,21 @@ static ssize_t dicedev_buffer_write(struct file *filp, const char __user *buf, s
 	dicedev_wt_add_task(ctx, task);
 
 	return count;
+
+err_copy:
+	kfree(cmd);
+err_task:
+	spin_lock_irqsave(&ctx->slock, flags);
+	ctx->task_count--;
+	spin_unlock_irqrestore(&ctx->slock, flags);
+err:
+	return err;
 }
 
 
 static int __buff_read_result(struct dicedev_buffer *buffer, struct dice *res) {
 	struct dice *result_page;
 	size_t page_no;
-	BUG_ON(buffer->reader.offset >= buffer->reader.result_count);
 
 	page_no = buffer->reader.offset / (DICEDEV_PAGE_SIZE / sizeof(struct dice));
 
@@ -171,19 +152,22 @@ static ssize_t dicedev_buffer_read(struct file *filp, char __user *buff, size_t 
 	struct dice result;
 	unsigned long flags;
 
-	if (count != 8) {
+//	printk(KERN_ERR "dicedev_buffer_read: count = %d\n", (int) offset);
+
+	if (count != sizeof(struct dice)) {
 		printk(KERN_ERR "dicedev_buffer_read: count is not 8\n");
 		return -EINVAL;
 	}
 
 	spin_lock_irqsave(&ctx->slock, flags);
-	while (res_buff->reader.result_count == 0 && ctx->task_count > 0) {
+	while (res_buff->reader.offset >= res_buff->reader.result_count && ctx->task_count > 0) {
 		spin_unlock_irqrestore(&ctx->slock, flags);
 		wait_event_interruptible(ctx->wq, res_buff->reader.result_count > 0 || ctx->task_count == 0);
 		spin_lock_irqsave(&ctx->slock, flags);
 	}
 
 	if (res_buff->reader.offset >= res_buff->reader.result_count) {
+		spin_unlock_irqrestore(&ctx->slock, flags);
 		return 0;
 	}
 
@@ -193,20 +177,85 @@ static ssize_t dicedev_buffer_read(struct file *filp, char __user *buff, size_t 
 		return -EFAULT;
 	}
 
+	spin_unlock_irqrestore(&ctx->slock, flags);
+
 	if (copy_to_user(buff, &result, sizeof(struct dice))) {
-		spin_unlock_irqrestore(&ctx->slock, flags);
 		printk(KERN_ERR "dicedev_buffer_read: failed to copy to user\n");
 		return -EFAULT;
 	}
 
-	if (res_buff->reader.offset >= res_buff->reader.result_count && ctx->task_count == 0 && res_buff->binded_slot != DICEDEV_BUFFER_NO_SLOT) {
-		unbind_slot(ctx->dev, res_buff);
-	}
-
-	spin_unlock_irqrestore(&ctx->slock, flags);
-	return 8;
+	return sizeof(struct dice);
+//
+//	spin_lock_irqsave(&ctx->dev->slock, flags);
+//	while (offset >= res_buff->reader.result_count && ctx->task_count > 0) {
+//		spin_unlock_irqrestore(&ctx->dev->slock, flags);
+//		wait_event_interruptible(ctx->wq, res_buff->reader.result_count > 0 || ctx->task_count == 0);
+//		spin_lock_irqsave(&ctx->dev->slock, flags);
+//	}
+//
+//	if (offset >= res_buff->reader.result_count) {
+//		return 0;
+//	}
+//
+//	if (__buff_read_result(res_buff, &result, offset)) {
+//		printk(KERN_ERR "dicedev_buffer_read: failed to read result\n");
+//		return -EFAULT;
+//	}
+//
+//	*offp += sizeof(struct dice);
+//
+//	spin_unlock_irqrestore(&ctx->dev->slock, flags);
+//
+//	if (copy_to_user(buff, &result, sizeof(struct dice))) {
+//		printk(KERN_ERR "dicedev_buffer_read: failed to copy to user\n");
+//		return -EFAULT;
+//	}
+//
+//	return sizeof(struct dice);
+//
+//	spin_lock_irqsave(&ctx->slock, flags);
+//	while (res_buff->reader.result_count == 0 && ctx->task_count > 0) {
+//		spin_unlock_irqrestore(&ctx->slock, flags);
+//		wait_event_interruptible(ctx->wq, res_buff->reader.result_count > 0 || ctx->task_count == 0);
+//		spin_lock_irqsave(&ctx->slock, flags);
+//	}
+//
+//	if (res_buff->reader.offset >= res_buff->reader.result_count) {
+//		return 0;
+//	}
+//
+//	if (copy_to_user(buff, &result, sizeof(struct dice))) {
+//		printk(KERN_ERR "dicedev_buffer_read: failed to copy to user\n");
+//		return -EFAULT;
+//	}
+//
+//	if (copy_to_user(buff, &result, sizeof(struct dice))) {
+//		printk(KERN_ERR "dicedev_buffer_read: failed to copy to user\n");
+//		return -EFAULT;
+//	}
+//
+//	return 0;
+//
+//	spin_unlock_irqrestore(&ctx->slock, flags);
+//
+//	if (__buff_read_result(res_buff, &result)) {
+//		printk(KERN_ERR "dicedev_buffer_read: failed to read result\n");
+//		return -EFAULT;
+//	}
+//
+//	if (copy_to_user(buff, &result, sizeof(struct dice))) {
+//		printk(KERN_ERR "dicedev_buffer_read: failed to copy to user\n");
+//		return -EFAULT;
+//	}
+//
+//	if (res_buff->reader.offset >= res_buff->reader.result_count && ctx->task_count == 0 && res_buff->binded_slot != DICEDEV_BUFFER_NO_SLOT) {
+//		spin_lock_irqsave(&ctx->dev->slock, flags);
+//		unbind_slot(ctx->dev, res_buff);
+//		spin_unlock_irqrestore(&ctx->dev->slock, flags);
+//	}
+//
+//	return 8;
 }
-
 
 
 static long dicedev_buffer_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
@@ -235,18 +284,91 @@ static long dicedev_buffer_ioctl(struct file *filp, unsigned int cmd, unsigned l
 	}
 }
 
+
+static int dicedev_buffer_release(struct inode* inode, struct file *filp) {
+	struct dicedev_buffer *buff = filp->private_data;
+
+	dicedev_pt_free(buff->dev->pdev, buff->pt);
+	kfree(buff);
+
+	return 0;
+}
+
+
 static const struct file_operations dicedev_buffer_fops = {
 	.owner = THIS_MODULE,
 	.mmap = dicedev_buffer_mmap,
 	.read = dicedev_buffer_read,
 	.write = dicedev_buffer_write,
 	.unlocked_ioctl = dicedev_buffer_ioctl,
+	.release = dicedev_buffer_release
 };
 
 
-
-int dicedev_buffer_get_fd(struct dicedev_buffer *buff) {
+int dicedev_buffer_init(struct dicedev_context *ctx,
+			struct dicedev_buffer *buff,
+			size_t size,
+			uint64_t allowed) {
+	int err;
+	BUG_ON(!ctx);
 	BUG_ON(!buff);
 
-	return anon_inode_getfd("dicedev_buffer", &dicedev_buffer_fops, buff, O_RDWR);
+	buff->pt = kzalloc(sizeof(struct dicedev_page_table), GFP_KERNEL);
+
+	if (!buff->pt) {
+		printk(KERN_ERR "dicedev_buffer_init: failed to allocate page table\n");
+		err = -ENOMEM;
+		goto error;
+	}
+
+	if (dicedev_pt_init(ctx->dev->pdev, buff->pt, size) <  0) {
+		printk(KERN_ERR "dicedev_buffer_init: failed to initialize page table\n");
+		err = -ENOMEM;
+		goto err_pt;
+	}
+
+	buff->ctx = ctx;
+	buff->dev = ctx->dev;
+	INIT_LIST_HEAD(&buff->context_buffers);
+	buff->destroyed = 0;
+	buff->seed = DICEDEV_DEFAULT_SEED;
+	buff->seed_chg = 0;
+	buff->allowed = allowed;
+	buff->binded_slot = DICEDEV_BUFFER_NO_SLOT;
+	buff->destroyed = 0;
+
+	buff->reader.result_count = 0;
+	buff->reader.offset = 0;
+	buff->file = anon_inode_getfile("dicedev_buffer", &dicedev_buffer_fops, buff, O_RDWR);
+
+	if (IS_ERR(buff->file)) {
+		err = PTR_ERR(buff->file);
+		goto err_pt;
+	}
+
+	get_file(buff->file);
+
+	return 0;
+
+err_pt:
+	kfree(buff->pt);
+error:
+	return err;
+}
+
+
+int dicedev_buffer_get_fd(struct dicedev_buffer *buff) {
+	int error, fd;
+
+	error = get_unused_fd_flags(O_RDWR);
+
+	if (error < 0) {
+		return error;
+	}
+
+	fd = error;
+
+	fd_install(fd, buff->file);
+
+	return fd;
 }

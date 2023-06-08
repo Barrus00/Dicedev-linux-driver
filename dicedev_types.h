@@ -25,6 +25,8 @@
 
 #define DICEDEV_FENCE_DONE_NUM 1
 
+#define DICEDEV_BUFFER_STATE_RELEASED 1
+#define DICEDEV_BUFFER_STATE_CTX_CLOSED 2
 
 struct dicedev_buffer;
 
@@ -35,8 +37,17 @@ struct dicedev_device {
 	struct device *dev;
 	void __iomem *bar;
 	spinlock_t slock;
+	bool task_done;
 
-	size_t fence_count;
+	struct {
+		int count;
+		bool reached;
+		int last_handled;
+		bool queued;
+	} fence;
+
+	int fence_count;
+	int fence_last_count;
 
 	struct dicedev_buffer *buff_slots[DICEDEV_NUM_SLOTS];
 	size_t free_slots;
@@ -67,10 +78,13 @@ struct dicedev_context {
 
 struct dicedev_buffer {
 	struct dicedev_page_table *pt;
+	struct dicedev_device *dev;
 	struct dicedev_context *ctx;
 	struct list_head context_buffers;
 
-	bool destroyed;
+	struct file *file;
+
+	bool destroyed; /* Associated context has been destroyed */
 	size_t seed;
 	bool seed_chg;
 	uint32_t allowed;

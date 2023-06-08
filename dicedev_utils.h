@@ -3,6 +3,8 @@
 
 #include "dicedev_types.h"
 
+#define DICEDEV_MAX_FENCE_VAL (1 << 28)
+
 /* NOTE: This function should be called with slock held */
 void dicedev_iow(struct dicedev_device *dev, uint32_t reg, uint32_t val);
 
