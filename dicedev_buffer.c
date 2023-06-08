@@ -78,7 +78,6 @@ static ssize_t dicedev_buffer_write(struct file *filp, const char __user *buf, s
 	ctx->task_count++;
 	spin_unlock_irqrestore(&buff->ctx->slock, flags);
 
-
 	cmd = kmalloc(count, GFP_KERNEL);
 
 	if (!cmd) {
@@ -120,6 +119,7 @@ err_copy:
 err_task:
 	spin_lock_irqsave(&ctx->slock, flags);
 	ctx->task_count--;
+	wake_up_interruptible(&task->ctx->wq);
 	spin_unlock_irqrestore(&ctx->slock, flags);
 err:
 	return err;
@@ -152,8 +152,6 @@ static ssize_t dicedev_buffer_read(struct file *filp, char __user *buff, size_t 
 	struct dice result;
 	unsigned long flags;
 
-//	printk(KERN_ERR "dicedev_buffer_read: count = %d\n", (int) offset);
-
 	if (count != sizeof(struct dice)) {
 		printk(KERN_ERR "dicedev_buffer_read: count is not 8\n");
 		return -EINVAL;
@@ -185,76 +183,6 @@ static ssize_t dicedev_buffer_read(struct file *filp, char __user *buff, size_t 
 	}
 
 	return sizeof(struct dice);
-//
-//	spin_lock_irqsave(&ctx->dev->slock, flags);
-//	while (offset >= res_buff->reader.result_count && ctx->task_count > 0) {
-//		spin_unlock_irqrestore(&ctx->dev->slock, flags);
-//		wait_event_interruptible(ctx->wq, res_buff->reader.result_count > 0 || ctx->task_count == 0);
-//		spin_lock_irqsave(&ctx->dev->slock, flags);
-//	}
-//
-//	if (offset >= res_buff->reader.result_count) {
-//		return 0;
-//	}
-//
-//	if (__buff_read_result(res_buff, &result, offset)) {
-//		printk(KERN_ERR "dicedev_buffer_read: failed to read result\n");
-//		return -EFAULT;
-//	}
-//
-//	*offp += sizeof(struct dice);
-//
-//	spin_unlock_irqrestore(&ctx->dev->slock, flags);
-//
-//	if (copy_to_user(buff, &result, sizeof(struct dice))) {
-//		printk(KERN_ERR "dicedev_buffer_read: failed to copy to user\n");
-//		return -EFAULT;
-//	}
-//
-//	return sizeof(struct dice);
-//
-//	spin_lock_irqsave(&ctx->slock, flags);
-//	while (res_buff->reader.result_count == 0 && ctx->task_count > 0) {
-//		spin_unlock_irqrestore(&ctx->slock, flags);
-//		wait_event_interruptible(ctx->wq, res_buff->reader.result_count > 0 || ctx->task_count == 0);
-//		spin_lock_irqsave(&ctx->slock, flags);
-//	}
-//
-//	if (res_buff->reader.offset >= res_buff->reader.result_count) {
-//		return 0;
-//	}
-//
-//	if (copy_to_user(buff, &result, sizeof(struct dice))) {
-//		printk(KERN_ERR "dicedev_buffer_read: failed to copy to user\n");
-//		return -EFAULT;
-//	}
-//
-//	if (copy_to_user(buff, &result, sizeof(struct dice))) {
-//		printk(KERN_ERR "dicedev_buffer_read: failed to copy to user\n");
-//		return -EFAULT;
-//	}
-//
-//	return 0;
-//
-//	spin_unlock_irqrestore(&ctx->slock, flags);
-//
-//	if (__buff_read_result(res_buff, &result)) {
-//		printk(KERN_ERR "dicedev_buffer_read: failed to read result\n");
-//		return -EFAULT;
-//	}
-//
-//	if (copy_to_user(buff, &result, sizeof(struct dice))) {
-//		printk(KERN_ERR "dicedev_buffer_read: failed to copy to user\n");
-//		return -EFAULT;
-//	}
-//
-//	if (res_buff->reader.offset >= res_buff->reader.result_count && ctx->task_count == 0 && res_buff->binded_slot != DICEDEV_BUFFER_NO_SLOT) {
-//		spin_lock_irqsave(&ctx->dev->slock, flags);
-//		unbind_slot(ctx->dev, res_buff);
-//		spin_unlock_irqrestore(&ctx->dev->slock, flags);
-//	}
-//
-//	return 8;
 }
 
 

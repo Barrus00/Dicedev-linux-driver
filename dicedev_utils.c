@@ -37,6 +37,8 @@ int get_slot(struct dicedev_device *dev) {
 		}
 	}
 
+	printk(KERN_ERR "get_slot: %d\n", slot);
+
 	return slot;
 }
 
@@ -73,4 +75,12 @@ void unbind_slot(struct dicedev_device *dev, struct dicedev_buffer *buff) {
 	dev->free_slots++;
 
 	feed_cmd(dev, &cmd, 1);
+}
+
+
+void restart_device(struct dicedev_device *dev) {
+	dicedev_iow(dev, DICEDEV_ENABLE, 0);
+	dicedev_iow(dev, DICEDEV_INTR, DICEDEV_ACTIVE_INTR);
+	dicedev_iow(dev, DICEDEV_INTR_ENABLE, DICEDEV_ACTIVE_INTR);
+	dicedev_iow(dev, DICEDEV_ENABLE, 1);
 }

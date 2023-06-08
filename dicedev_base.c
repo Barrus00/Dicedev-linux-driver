@@ -262,7 +262,6 @@ static long dicedev_ioctl_run(struct dicedev_context *ctx, unsigned long arg) {
 
 static long dicedev_ioctl_wait(struct dicedev_context *ctx, unsigned long arg) {
 	char __user *argp = (char __user *)arg;
-	struct dicedev_device *dev = ctx->dev;
 	struct dicedev_ioctl_wait wCmd;
 	unsigned long flags;
 
@@ -270,35 +269,19 @@ static long dicedev_ioctl_wait(struct dicedev_context *ctx, unsigned long arg) {
 		return -EFAULT;
 	}
 
-//	printk(KERN_ERR "dicedev_ioctl_wait: waiting for %d tasks to  be completeddd\n", wCmd.cnt);
-
-	spin_lock_irqsave(&dev->slock, flags);
+	spin_lock_irqsave(&ctx->slock, flags);
 	while (wCmd.cnt < ctx->task_count) {
-
-//		wake_up_locked()
-//		printk(KERN_ERR "dicedev_ioctl_wait: waiting for %d tasks to  be completed\n", (int)ctx->task_count);
-		spin_unlock_irqrestore(&dev->slock, flags);
-//		wait_event_lock_irq(ctx->wq, wCmd.cnt >= ctx->task_count, &dev->slock);
-////		wait_event_cmd(ctx->wq, wCmd.cnt >= ctx->task_count,
-////				spin_unlock_irqrestore(&dev->slock, flags),
-////				spin_lock_irqsave(&dev->slock, flags));
-//		wait_event_interruptible_timeout(ctx->wq, wCmd.cnt >= ctx->task_count, 60);
+		spin_unlock_irqrestore(&ctx->slock, flags);
 		wait_event_interruptible(ctx->wq, wCmd.cnt >= ctx->task_count);
-//		printk(KERN_ERR "dicedev_ioctl_wait: woken up\n");
-//		printk(KERN_ERR "dicedev_ioctl_wait: waiting for %d tasks to  be completed\n", (int)ctx->task_count);
-		spin_lock_irqsave(&dev->slock, flags);
+		spin_lock_irqsave(&ctx->slock, flags);
 	}
 
-//	printk(KERN_ERR "dicedev_ioctl_wait: all tasks completed\n");
-
 	if (ctx->failed) {
-		spin_unlock_irqrestore(&dev->slock, flags);
+		spin_unlock_irqrestore(&ctx->slock, flags);
 		return -EIO;
 	}
 
-//	printk(KERN_ERR "dicedev_ioctl_wait: returning\n");
-
-	spin_unlock_irqrestore(&dev->slock, flags);
+	spin_unlock_irqrestore(&ctx->slock, flags);
 	return 0;
 }
 
@@ -326,9 +309,9 @@ static long dicedev_ioctl_seed_increment(struct dicedev_context *ctx, unsigned l
 }
 
 
-//static void dicedev_ctx_fail(struct dicedev_context *ctx) {
-//	ctx->failed = true;
-//}
+static inline void dicedev_ctx_fail(struct dicedev_context *ctx) {
+	ctx->failed = true;
+}
 
 
 /* IRQ handler */
@@ -345,30 +328,29 @@ static irqreturn_t dicedev_isr(int irq, void *opaque)
 	if (istatus) {
 		dicedev_iow(dev, DICEDEV_INTR, istatus);
 
-		if ((istatus & DICEDEV_INTR_CMD_ERROR)) {
-			printk("dicedev_isr: command error interrupt\n");
+		if (istatus & (DICEDEV_INTR_CMD_ERROR | DICEDEV_INTR_MEM_ERROR)) {
+			struct list_head *lh;
+			struct dicedev_task *task;
+
+			BUG_ON(list_empty(&dev->wt.running_tasks));
+
+			lh = dev->wt.running_tasks.next;
+			task = container_of(lh, struct dicedev_task, lh);
+
+		    	dicedev_ctx_fail(task->ctx);
 		}
 
-//		if ((istatus & DICEDEV_INTR_MEM_ERROR)) {
-////			struct list_head *lh;
-////			struct dicedev_task *task;
-//
-////			printk(KERN_ERR "dicedev_isr: error interrupt\n");
-////
-////			BUG_ON(list_empty(&dev->wt.running_tasks));
-////
-////			lh = dev->wt.running_tasks.next;
-////			task = container_of(lh, struct dicedev_task, lh);
-////
-////			dicedev_ctx_fail(task->ctx);
-//		}
-
-
 		if (istatus & DICEDEV_INTR_FENCE_WAIT) {
-//			BUG_ON(list_empty(&dev->wt.running_tasks));
+			BUG_ON(list_empty(&dev->wt.running_tasks));
 
-			dev->fence.reached = true;
+			dev->fence_state = DICEDEV_FENCE_STATE_REACHED;
 			wake_up_interruptible(&dev->wt.task_cond);
+			printk(KERN_INFO "dicedev_isr: fence reached\n");
+//
+////			BUG_ON(list_empty(&dev->wt.running_tasks));
+//
+//			dev->fence.reached = true;
+//			wake_up_interruptible(&dev->wt.task_cond);
 
 //			lh = dev->wt.running_tasks.next;
 //			list_del(lh);
@@ -420,6 +402,9 @@ static irqreturn_t dicedev_isr(int irq, void *opaque)
 			// TODO: Propably nothing, and should simply disable this interrupt.
 		}
 
+		if (istatus & DICEDEV_INTR_SLOT_ERROR) {
+			printk(KERN_ERR "dicedev_isr: slot error interrupt\n");
+		}
 
 		BUG_ON(istatus & DICEDEV_INTR_SLOT_ERROR);
 	}
@@ -439,10 +424,9 @@ static struct pci_device_id dicedev_pci_ids[] = {
 static int dicedev_probe(struct pci_dev *pdev, const struct pci_device_id *pci_id)
 {
 	int err, i;
-	const uint32_t enabled_intr = DICEDEV_INTR_FENCE_WAIT
-				      | DICEDEV_INTR_FEED_ERROR
-				      | DICEDEV_INTR_CMD_ERROR
-				      | DICEDEV_INTR_MEM_ERROR;
+	const uint32_t enabled_intr =
+		DICEDEV_INTR_FENCE_WAIT | DICEDEV_INTR_FEED_ERROR |
+		DICEDEV_INTR_CMD_ERROR | DICEDEV_INTR_MEM_ERROR | DICEDEV_INTR_SLOT_ERROR;
 
 	/* Allocate device structure */
 	struct dicedev_device *dev = kzalloc(sizeof(struct dicedev_device), GFP_KERNEL);
@@ -507,6 +491,13 @@ static int dicedev_probe(struct pci_dev *pdev, const struct pci_device_id *pci_i
 	dicedev_iow(dev, DICEDEV_INTR_ENABLE, enabled_intr);
 	dicedev_iow(dev, DICEDEV_CMD_FENCE_WAIT, 1);
 	dicedev_iow(dev, DICEDEV_CMD_FENCE_LAST, 0);
+
+	for (i = 0; i < DICEDEV_NUM_SLOTS; i++) {
+		uint32_t cmd;
+		cmd = DICEDEV_USER_CMD_UNBIND_SLOT_HEADER(i);
+
+		feed_cmd(dev, &cmd, 1);
+	}
 
 	cdev_init(&dev->cdev, &dicedev_file_ops);
 

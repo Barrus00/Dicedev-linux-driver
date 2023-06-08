@@ -30,6 +30,12 @@
 
 struct dicedev_buffer;
 
+enum dicedev_fence_state {
+	DICEDEV_FENCE_STATE_NONE,
+	DICEDEV_FENCE_STATE_WAITING,
+	DICEDEV_FENCE_STATE_REACHED
+};
+
 struct dicedev_device {
 	struct pci_dev *pdev;
 	struct cdev cdev;
@@ -38,6 +44,9 @@ struct dicedev_device {
 	void __iomem *bar;
 	spinlock_t slock;
 	bool task_done;
+
+	enum dicedev_fence_state fence_state;
+	bool failed;
 
 	struct {
 		int count;

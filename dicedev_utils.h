@@ -5,6 +5,9 @@
 
 #define DICEDEV_MAX_FENCE_VAL (1 << 28)
 
+#define DICEDEV_ACTIVE_INTR \
+	DICEDEV_INTR_FENCE_WAIT | DICEDEV_INTR_CMD_ERROR | DICEDEV_INTR_MEM_ERROR
+
 /* NOTE: This function should be called with slock held */
 void dicedev_iow(struct dicedev_device *dev, uint32_t reg, uint32_t val);
 
@@ -26,5 +29,8 @@ void bind_slot(struct dicedev_device *dev, struct dicedev_buffer *buff, int slot
 
 /* NOTE: This function should be called with slock held */
 void unbind_slot(struct dicedev_device *dev, struct dicedev_buffer *buff);
+
+
+void restart_device(struct dicedev_device *dev);
 
 #endif //DICEDEV_UTILS_H

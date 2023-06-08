@@ -162,93 +162,285 @@ err_ctx_fail:
 }
 
 
-static inline void __update_done_tasks(struct dicedev_device *dev) {
-	struct dicedev_task *task;
-	struct list_head *lh;
-	uint32_t last_fence = dev->fence.last_handled;
-	uint32_t current_fence;
-	unsigned long flags;
+//static inline void __update_done_tasks(struct dicedev_device *dev) {
+//	struct dicedev_task *task;
+//	struct list_head *lh;
+//	uint32_t last_fence = dev->fence.last_handled;
+//	uint32_t current_fence;
+//	unsigned long flags;
+//
+//	spin_lock_irqsave(&dev->slock, flags);
+//	dev->fence.reached = false;
+//
+//	current_fence = dicedev_ior(dev, DICEDEV_CMD_FENCE_LAST);
+//
+//	while (last_fence != current_fence) {
+////		printk("TASK DONE!\n");
+//		lh = dev->wt.running_tasks.next;
+//		list_del(lh);
+//		task = container_of(lh, struct dicedev_task, lh);
+//		spin_lock_irqsave(&task->ctx->slock, flags);
+//		task->ctx->task_count--;
+//		task->buff_out->reader.result_count += task->result_count;
+//
+//		spin_unlock_irqrestore(&task->ctx->slock, flags);
+//		wake_up_interruptible(&task->ctx->wq);
+//
+//		printk(KERN_ERR "Task done for buffer %p\n", task->buff_out);
+//
+//		if (task->type == DICEDEV_TASK_TYPE_RUN) {
+//			unbind_slot(dev, task->buff_out);
+//		}
+//		kfree(task);
+//
+//		last_fence = (last_fence + 1) % DICEDEV_MAX_FENCE_VAL;
+//	}
+//
+//	dev->fence.last_handled = last_fence;
+//
+//	spin_unlock_irqrestore(&dev->slock, flags);
+//}
 
-	spin_lock_irqsave(&dev->slock, flags);
-	dev->fence.reached = false;
 
-	current_fence = dicedev_ior(dev, DICEDEV_CMD_FENCE_LAST);
+enum wt_event {
+	WT_NO_EVENT,
+	WT_EVENT_TASK_GET_NEXT,
+	WT_EVENT_TASK_BIND_SLOT,
+	WT_EVENT_TASK_RUN,
+	WT_EVENT_TASK_FINISH,
+	WT_DIE
+};
 
-	while (last_fence != current_fence) {
-//		printk("TASK DONE!\n");
-		lh = dev->wt.running_tasks.next;
-		list_del(lh);
-		task = container_of(lh, struct dicedev_task, lh);
-		spin_lock_irqsave(&task->ctx->slock, flags);
-		task->ctx->task_count--;
-		task->buff_out->reader.result_count += task->result_count;
 
-		spin_unlock_irqrestore(&task->ctx->slock, flags);
-		wake_up_interruptible(&task->ctx->wq);
+struct wt_state {
+	struct dicedev_device *dev;
+	struct dicedev_task *next_task;
+};
 
-		if (task->type == DICEDEV_TASK_TYPE_RUN) {
-			unbind_slot(dev, task->buff_out);
-		}
-		kfree(task);
 
-		last_fence = (last_fence + 1) % DICEDEV_MAX_FENCE_VAL;
+static inline enum wt_event __wt_get_event(struct wt_state *wtState) {
+	if (!wtState->dev->wt.running) {
+		return WT_DIE;
 	}
 
-	dev->fence.last_handled = last_fence;
+	if (wtState->dev->fence_state == DICEDEV_FENCE_STATE_REACHED) {
+		return WT_EVENT_TASK_FINISH;
+	}
 
-	spin_unlock_irqrestore(&dev->slock, flags);
+	if (wtState->next_task == NULL) {
+		return !list_empty(&wtState->dev->wt.pending_tasks) ? WT_EVENT_TASK_GET_NEXT : WT_NO_EVENT;
+	}
+
+	if (wtState->dev->fence_state != DICEDEV_FENCE_STATE_NONE) {
+		return WT_NO_EVENT;
+	}
+
+	if (wtState->next_task->buff_out->binded_slot == DICEDEV_BUFFER_NO_SLOT) {
+		return wtState->dev->free_slots > 0 ? WT_EVENT_TASK_BIND_SLOT : WT_NO_EVENT;
+	}
+
+	return WT_EVENT_TASK_RUN;
+}
+
+
+static inline void __task_destroy(struct dicedev_task *task) {
+	struct dicedev_device *dev = task->ctx->dev;
+	unsigned long flags;
+
+	spin_lock_irqsave(&task->ctx->slock, flags);
+	task->ctx->task_count--;
+	task->buff_out->reader.result_count += task->result_count;
+	spin_unlock_irqrestore(&task->ctx->slock, flags);
+	wake_up_interruptible(&task->ctx->wq);
+
+	if (task->type == DICEDEV_TASK_TYPE_RUN) {
+		unbind_slot(dev, task->buff_out);
+	}
+
+	if (task->ctx->failed && task->buff_out->binded_slot != DICEDEV_BUFFER_NO_SLOT) {
+		spin_lock(&dev->slock);
+		unbind_slot(dev, task->buff_out);
+		spin_unlock(&dev->slock);
+	}
+
+	kfree(task);
 }
 
 
 static int dicedev_wt_fn(void *data) {
 	struct dicedev_device *dev = data;
+	struct wt_state wtState = {
+		.dev = dev,
+		.next_task = NULL
+	};
 	struct dicedev_task *task;
 	struct list_head *task_lh;
 	uint32_t fence_cmd;
 	unsigned long flags;
 
 	while (dev->wt.running) {
-		__update_done_tasks(dev);
-
-		if (list_empty(&dev->wt.pending_tasks)) {
-			wait_event_interruptible(dev->wt.task_cond, !list_empty(&dev->wt.pending_tasks) || !dev->wt.running || dev->fence.reached);
+		switch (__wt_get_event(&wtState)) {
+		case WT_DIE:
 			continue;
-		}
 
-		spin_lock_irqsave(&dev->slock, flags);
+		case WT_NO_EVENT:
+			wait_event_interruptible(dev->wt.task_cond,
+						 __wt_get_event(&wtState) != WT_NO_EVENT);
+			continue;
 
-		/* Get next task */
-		task_lh = dev->wt.pending_tasks.next;
-		list_del(task_lh);
-		task = container_of(task_lh, struct dicedev_task, lh);
-//		printk(KERN_ERR "dicedev: task %p\n", task);
-
-		while (dev->free_slots == 0 && task->buff_out->binded_slot == DICEDEV_BUFFER_NO_SLOT) {
-			spin_unlock_irqrestore(&dev->slock, flags);
-			wait_event_interruptible(dev->wt.slot_cond, dev->free_slots > 0);
+		case WT_EVENT_TASK_GET_NEXT:
+			/* TODO: Change to list_for_each_entry_safe */
 			spin_lock_irqsave(&dev->slock, flags);
-		}
+			task_lh = dev->wt.pending_tasks.next;
+			list_del(task_lh);
+			spin_unlock_irqrestore(&dev->slock, flags);
 
-		if (task->buff_out->binded_slot == DICEDEV_BUFFER_NO_SLOT) {
+			task = container_of(task_lh, struct dicedev_task, lh);
+
+			if (task->ctx->failed) {
+				__task_destroy(task);
+				continue;
+			}
+
+			wtState.next_task = task;
+			break;
+
+		case WT_EVENT_TASK_BIND_SLOT:
+			task = wtState.next_task;
+
+			spin_lock_irqsave(&dev->slock, flags);
 			bind_slot(dev, task->buff_out, get_slot(dev));
-//			printk(KERN_ERR "Binded slot %d", task->buff_out->binded_slot);
 			dicedev_buffer_init_reader(task->buff_out);
+			spin_unlock_irqrestore(&dev->slock, flags);
+			break;
+
+		case WT_EVENT_TASK_RUN:
+			dev->fence_state = DICEDEV_FENCE_STATE_WAITING;
+			printk(KERN_ERR "dicedev_wt: Task ran!\n");
+
+			__wt_run_task(wtState.next_task);
+			printk(KERN_ERR "dicedev_wt: Task sent!\n");
+
+			wtState.next_task = NULL;
+
+			/* Task sent, set fence */
+			spin_lock_irqsave(&dev->slock, flags);
+			dev->fence.count = (dev->fence.count + 1) % DICEDEV_MAX_FENCE_VAL;
+
+			fence_cmd = DICEDEV_USER_CMD_FENCE_HEADER(dev->fence.count);
+			dicedev_iow(dev, DICEDEV_CMD_FENCE_WAIT, dev->fence.count);
+			feed_cmd(dev, &fence_cmd, 1);
+			spin_unlock_irqrestore(&dev->slock, flags);
+			break;
+
+		case WT_EVENT_TASK_FINISH:
+			printk(KERN_ERR "dicedev_wt: Task finished!\n");
+			BUG_ON(list_empty(&dev->wt.running_tasks));
+
+			/* Dont need to lock, only dice thread can modify running_tasks */
+			task_lh = dev->wt.running_tasks.next;
+			list_del(task_lh);
+			task = container_of(task_lh, struct dicedev_task, lh);
+
+			__task_destroy(task);
+
+			if (dev->failed) {
+				restart_device(dev);
+				dev->failed = false;
+			}
+
+			dev->fence_state = DICEDEV_FENCE_STATE_NONE;
+			break;
+
+		default:
+			BUG();
 		}
-
-		spin_unlock_irqrestore(&dev->slock, flags);
-
-		__wt_run_task(task);
-
-
-		spin_lock_irqsave(&dev->slock, flags);
-		dev->fence.count = (dev->fence.count + 1) % DICEDEV_MAX_FENCE_VAL;
-		fence_cmd = DICEDEV_USER_CMD_FENCE_HEADER(dev->fence.count);
-		dicedev_iow(dev, DICEDEV_CMD_FENCE_WAIT, dev->fence.count);
-		feed_cmd(dev, &fence_cmd, 1);
-		spin_unlock_irqrestore(&dev->slock, flags);
-
-//		printk(KERN_ERR "dicedev: fence %d\n", dev->fence.count);
 	}
+//		if ((ev = __wt_get_event(&wtState)) == WT_NO_EVENT)
+//		if (__wt_get_event(&wtState))
+//		while ((list_empty(&dev->wt.pending_tasks) || dev->fence_state == DICEDEV_FENCE_STATE_WAITING)
+//		       && dev->fence_state != DICEDEV_FENCE_STATE_REACHED) {
+//			wait_event_interruptible(dev->wt.task_cond, (!list_empty(&dev->wt.pending_tasks) && dev->fence_state != DICEDEV_FENCE_STATE_WAITING)
+//									|| dev->fence_state == DICEDEV_FENCE_STATE_REACHED
+//									|| !dev->wt.running);
+//
+//			continue;
+//		}
+//
+//		if (dev->fence_state == DICEDEV_FENCE_STATE_REACHED) {
+//			/* Previous task is done, update fence */
+//			dev->fence_state = DICEDEV_FENCE_STATE_NONE;
+//
+//			lh = dev->wt.running_tasks.next;
+//			list_del(lh);
+//			task = container_of(lh, struct dicedev_task, lh);
+//			spin_lock_irqsave(&task->ctx->slock, flags);
+//			task->ctx->task_count--;
+//			task->buff_out->reader.result_count += task->result_count;
+//			spin_unlock_irqrestore(&task->ctx->slock, flags);
+//			wake_up_interruptible(&task->ctx->wq);
+//
+//			if (dev->failed) {
+//				/* Device failed, restart device. */
+//				restart_device(dev);
+//+				dev->failed = false;
+//			}
+//
+//			if (task->type == DICEDEV_TASK_TYPE_RUN) {
+//				unbind_slot(dev, task->buff_out);
+//			}
+//
+//			kfree(task);
+//
+//			continue;
+//		}
+//
+//		while (list_empty(&dev->wt.pending_tasks)  !dev->fence.reached) {
+//			wait_event_interruptible(dev->wt.task_cond, !list_empty(&dev->wt.pending_tasks) || !dev->wt.running || dev->fence.reached);
+//		}
+//
+////		__update_done_tasks(dev);
+////
+////		if (list_empty(&dev->wt.pending_tasks)) {
+////			wait_event_interruptible(dev->wt.task_cond, !list_empty(&dev->wt.pending_tasks) || !dev->wt.running || dev->fence.reached);
+////			continue;
+////		}
+//
+//		spin_lock_irqsave(&dev->slock, flags);
+//
+//		/* Get next task */
+//		task_lh = dev->wt.pending_tasks.next;
+//		list_del(task_lh);
+//		task = container_of(task_lh, struct dicedev_task, lh);
+////		printk(KERN_ERR "dicedev: task %p\n", task);
+//
+//		while (dev->free_slots == 0 && task->buff_out->binded_slot == DICEDEV_BUFFER_NO_SLOT) {
+//			spin_unlock_irqrestore(&dev->slock, flags);
+//			wait_event_interruptible(dev->wt.slot_cond, dev->free_slots > 0);
+//			spin_lock_irqsave(&dev->slock, flags);
+//		}
+//
+//		if (task->buff_out->binded_slot == DICEDEV_BUFFER_NO_SLOT) {
+//			bind_slot(dev, task->buff_out, get_slot(dev));
+//			printk(KERN_ERR "Binded slot %d\n", task->buff_out->binded_slot);
+//			dicedev_buffer_init_reader(task->buff_out);
+//		}
+//
+//		spin_unlock_irqrestore(&dev->slock, flags);
+//
+//		__wt_run_task(task);
+//
+//
+//		spin_lock_irqsave(&dev->slock, flags);
+//		dev->fence.count = (dev->fence.count + 1) % DICEDEV_MAX_FENCE_VAL;
+//		fence_cmd = DICEDEV_USER_CMD_FENCE_HEADER(dev->fence.count);
+//		dicedev_iow(dev, DICEDEV_CMD_FENCE_WAIT, dev->fence.count);
+//		feed_cmd(dev, &fence_cmd, 1);
+//		spin_unlock_irqrestore(&dev->slock, flags);
+//
+//
+//
+//		printk(KERN_ERR "dicedev: fence %d\n", dev->fence.count);
 
 	return 0;
 }
