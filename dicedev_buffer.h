@@ -9,6 +9,9 @@ int dicedev_buffer_init(struct dicedev_context *ctx,
 			uint64_t allowed);
 
 
+void dicedev_buffer_destroy(struct dicedev_buffer *buff);
+
+
 int dicedev_buffer_get_fd(struct dicedev_buffer *buff);
 
 

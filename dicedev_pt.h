@@ -17,10 +17,13 @@ struct dicedev_page_table {
 };
 
 
-int dicedev_pt_create(struct pci_dev *pdev, struct dicedev_page_table *page_table, size_t size);
+int dicedev_pt_init(struct pci_dev *pdev, struct dicedev_page_table *page_table, size_t size);
+
 
 void dicedev_pt_free(struct pci_dev *pdev, struct dicedev_page_table *page_table);
 
+
 char *dicedev_pt_read(struct dicedev_page_table *pt, size_t count, size_t offset);
+
 
 #endif //DICEDEV_PT_H

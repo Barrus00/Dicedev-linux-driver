@@ -95,7 +95,6 @@ struct dicedev_context {
 	size_t task_count;
 	wait_queue_head_t wq;
 	struct list_head allocated_buffers;
-	struct list_head other_contexts;
 };
 
 
@@ -244,7 +243,7 @@ static irqreturn_t dicedev_isr(int irq, void *opaque)
 
 /* Main device node handling */
 
-static int dicedev_open(struct inode *inode, struct file *filp)
+static int dicedev_open(struct inode *inode, struct file *filp) /* Done */
 {
 	struct dicedev_device *dev = container_of(inode->i_cdev, struct dicedev_device, cdev);
 	struct dicedev_context *ctx = kzalloc(sizeof(struct dicedev_context), GFP_KERNEL);
@@ -259,7 +258,6 @@ static int dicedev_open(struct inode *inode, struct file *filp)
 	spin_lock_init(&ctx->slock);
 	init_waitqueue_head(&ctx->wq);
 
-	INIT_LIST_HEAD(&ctx->other_contexts);
 	INIT_LIST_HEAD(&ctx->allocated_buffers);
 
 	filp->private_data = ctx;
@@ -268,7 +266,7 @@ static int dicedev_open(struct inode *inode, struct file *filp)
 }
 
 
-static int dicedev_release(struct inode *inode, struct file *filp)
+static int dicedev_release(struct inode *inode, struct file *filp) /* Done */
 {
 	struct dicedev_context *ctx = filp->private_data;
 	struct dicedev_device *dev = ctx->dev;
@@ -517,6 +515,8 @@ static int get_slot(struct dicedev_device *dev)
 		}
 	}
 
+	printk(KERN_ERR "get_slot: slot: %d\n", slot);
+
 	return slot;
 }
 
@@ -533,7 +533,7 @@ static void __add_task(struct dicedev_device *dev, struct dicedev_task *task)
 }
 
 
-static long dicedev_ioctl_create_set(struct dicedev_context *ctx, unsigned long arg) {
+static long dicedev_ioctl_create_set(struct dicedev_context *ctx, unsigned long arg) /* Done */ {
 	char __user *argp = (char __user *)arg;
 	struct dicedev_ioctl_create_set cs;
 	struct dicedev_buffer *buff;
@@ -591,7 +591,7 @@ err:
 }
 
 
-static long dicedev_ioctl_run(struct dicedev_context *ctx, unsigned long arg) {
+static long dicedev_ioctl_run(struct dicedev_context *ctx, unsigned long arg) /* Done */{
 	char __user *argp = (char __user *)arg;
 	struct dicedev_ioctl_run rCmd;
 	struct dicedev_buffer *cBuff, *dBuff;
@@ -655,7 +655,7 @@ static long dicedev_ioctl_run(struct dicedev_context *ctx, unsigned long arg) {
 }
 
 
-static long dicedev_ioctl_wait(struct dicedev_context *ctx, unsigned long arg) {
+static long dicedev_ioctl_wait(struct dicedev_context *ctx, unsigned long arg) /* Done */ {
 	char __user *argp = (char __user *)arg;
 	struct dicedev_ioctl_wait wCmd;
 	struct dicedev_device *dev;
@@ -685,7 +685,7 @@ static long dicedev_ioctl_wait(struct dicedev_context *ctx, unsigned long arg) {
 }
 
 
-static long dicedev_ioctl_seed_increment(struct dicedev_context *ctx, unsigned long arg) {
+static long dicedev_ioctl_seed_increment(struct dicedev_context *ctx, unsigned long arg) /* Done */ {
 	char __user *argp = (char __user *)arg;
 	struct dicedev_ioctl_seed_increment siCmd;
 	unsigned long flags;
@@ -704,7 +704,7 @@ static long dicedev_ioctl_seed_increment(struct dicedev_context *ctx, unsigned l
 }
 
 
-static long dicedev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+static long dicedev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) /* Done */
 {
 	struct dicedev_context *ctx = filp->private_data;
 
@@ -732,7 +732,7 @@ static long dicedev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg
 	}
 }
 
-static const struct file_operations dicedev_file_ops = {
+static const struct file_operations dicedev_file_ops = { /* Done */
 	.owner = THIS_MODULE,
 	.open = dicedev_open,
 	.release = dicedev_release,
@@ -798,7 +798,6 @@ static void __wt_run_task(struct dicedev_task *task) {
 				goto err_ctx_fail;
 		}
 	}
-	printk(KERN_ERR "dicedev_thread_fn: DONE SENDING\n");
 
 	cmd[0] =  DICEDEV_USER_CMD_FENCE_HEADER(DICEDEV_FENCE_DONE_NUM);
 

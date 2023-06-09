@@ -25,16 +25,26 @@
 
 #define DICEDEV_FENCE_DONE_NUM 1
 
-#define DICEDEV_BUFFER_STATE_RELEASED 1
-#define DICEDEV_BUFFER_STATE_CTX_CLOSED 2
+
+#define DICEDEV_ACTIVE_INTR \
+	DICEDEV_INTR_FENCE_WAIT | DICEDEV_INTR_CMD_ERROR | DICEDEV_INTR_MEM_ERROR | DICEDEV_INTR_SLOT_ERROR
+
+#define DICEDEV_ALL_INTR \
+	DICEDEV_INTR_FENCE_WAIT | DICEDEV_INTR_FEED_ERROR | DICEDEV_INTR_CMD_ERROR \
+		| DICEDEV_INTR_MEM_ERROR | DICEDEV_INTR_SLOT_ERROR
+
 
 struct dicedev_buffer;
+
+struct dicedev_task;
+
 
 enum dicedev_fence_state {
 	DICEDEV_FENCE_STATE_NONE,
 	DICEDEV_FENCE_STATE_WAITING,
 	DICEDEV_FENCE_STATE_REACHED
 };
+
 
 struct dicedev_device {
 	struct pci_dev *pdev;
@@ -43,34 +53,21 @@ struct dicedev_device {
 	struct device *dev;
 	void __iomem *bar;
 	spinlock_t slock;
-	bool task_done;
+	spinlock_t feed_lock;
 
 	enum dicedev_fence_state fence_state;
 	bool failed;
 
-	struct {
-		int count;
-		bool reached;
-		int last_handled;
-		bool queued;
-	} fence;
-
-	int fence_count;
-	int fence_last_count;
-
 	struct dicedev_buffer *buff_slots[DICEDEV_NUM_SLOTS];
 	size_t free_slots;
-	bool increment_seeds;
 
 	/* Work thread structure, responsible for sending commands to device */
 	struct {
 		struct task_struct *thread;
 
-		bool running;
-		wait_queue_head_t task_cond;
-		wait_queue_head_t slot_cond;
+		wait_queue_head_t event_cond;
 		struct list_head pending_tasks;
-		struct list_head running_tasks;
+		struct dicedev_task *running_task;
 	} wt;
 };
 
@@ -119,7 +116,7 @@ struct dicedev_task_write {
 
 	struct {
 		size_t offset;
-	} it;
+	} it; /* Iterator */
 };
 
 
@@ -133,7 +130,7 @@ struct dicedev_task_run {
 		size_t curr_pg_no;
 		size_t curr_pg_off;
 		size_t bytes_left;
-	} it;
+	} it; /* Iterator */
 };
 
 

@@ -6,15 +6,8 @@
 
 #include "dicedev_pt.h"
 
-#define DICEDEV_PT_PREFIX "[dicedev_pt] "
-
-#define PAGE_SIZE_BITS 12
-
-#define IS_PAGE_ALIGNED(x) (((x) & (DICEDEV_PAGE_SIZE - 1)) == 0)
-
 #define PRESENT_MASK 0x1
 #define PRESENT(x) ((x) & PRESENT_MASK)
-#define PA_MASK 0xFFFFFFF0 // TODO: check if this is correct for little endian
 
 #define MAKE_PT_ENTRY(addr) (0x1 | ((addr) >> 8))
 
@@ -24,15 +17,13 @@ typedef uint32_t page_entry_t;
 
 static int page_init(struct pci_dev *pdev, struct dicedev_page *p) {
 	if (!p) {
-		printk(KERN_ERR "page_init: p is NULL\n");
-		return -1; // TODO: error code
+		return -EINVAL;
 	}
 
 	p->page = dma_alloc_coherent(&pdev->dev, DICEDEV_PAGE_SIZE, &p->dma_handler, GFP_KERNEL | __GFP_ZERO);
 
 	if (!p->page) {
-		printk(KERN_ERR "page_init: dma_alloc_coherent failed\n");
-		return -1; // TODO: error code + should we free something here?
+		return -ENOMEM;
 	}
 
 	return 0;
@@ -41,7 +32,6 @@ static int page_init(struct pci_dev *pdev, struct dicedev_page *p) {
 
 static void page_free(struct pci_dev *pdev, struct dicedev_page *p) {
 	if (!p) {
-		printk(KERN_ERR "page_free: p is NULL\n");
 		return;
 	}
 
@@ -49,19 +39,20 @@ static void page_free(struct pci_dev *pdev, struct dicedev_page *p) {
 }
 
 
-int dicedev_pt_create(struct pci_dev *pdev, struct dicedev_page_table *page_table, size_t size) {
+int dicedev_pt_init(struct pci_dev *pdev, struct dicedev_page_table *page_table, size_t size) {
+	int err;
 	size_t i;
 	size_t num_pages;
 	page_entry_t *page_entries;
 
 	if (!page_table) {
-		printk(KERN_ERR "dicedev_pt_create: p is NULL\n");
-		return -1; // TODO: error code
+		err = -EINVAL;
+		goto error;
 	}
 
 	if (page_init(pdev, &page_table->pt) < 0) {
-		printk(KERN_ERR "dicedev_pt_create: page_init failed\n");
-		return -1; // TODO: error code
+		err = -ENOMEM;
+		goto error;
 	}
 
 	num_pages = (size + DICEDEV_PAGE_SIZE - 1) / DICEDEV_PAGE_SIZE;
@@ -70,13 +61,13 @@ int dicedev_pt_create(struct pci_dev *pdev, struct dicedev_page_table *page_tabl
 	page_table->num_pages = num_pages;
 
 	if (!(page_table->pages = kzalloc(sizeof(struct dicedev_page) * num_pages, GFP_KERNEL))) {
-		printk(KERN_ERR "dicedev_pt_create: kmalloc failed\n");
+		err = -ENOMEM;
 		goto err_entries;
 	}
 
 	for (i = 0; i < num_pages; i++) {
 		if (page_init(pdev, &page_table->pages[i]) < 0) {
-			printk(KERN_ERR "dicedev_pt_create: page_init failed\n");
+			err = -ENOMEM;
 			goto err_pages;
 		}
 
@@ -98,7 +89,8 @@ err_pages:
 err_entries:
 	page_free(pdev, &page_table->pt);
 
-	return -1;
+error:
+	return err;
 }
 
 
@@ -107,7 +99,6 @@ void dicedev_pt_free(struct pci_dev *pdev, struct dicedev_page_table *page_table
 	page_entry_t *page_entries;
 
 	if (!page_table) {
-		printk(KERN_ERR "dicedev_pt_free: page_table is NULL\n");
 		return;
 	}
 

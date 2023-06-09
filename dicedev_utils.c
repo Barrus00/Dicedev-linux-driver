@@ -15,6 +15,9 @@ uint32_t dicedev_ior(struct dicedev_device *dev, uint32_t reg) {
 
 
 void feed_cmd(struct dicedev_device *dev, uint32_t *cmd, size_t cmd_size) {
+	unsigned long flags;
+	spin_lock_irqsave(&dev->feed_lock, flags);
+
 	for (size_t i = 0; i < cmd_size; i++) {
 		while (dicedev_ior(dev, CMD_MANUAL_FREE) == 0) {
 			// Wait for free slot.
@@ -22,6 +25,8 @@ void feed_cmd(struct dicedev_device *dev, uint32_t *cmd, size_t cmd_size) {
 
 		dicedev_iow(dev, CMD_MANUAL_FEED, cmd[i]);
 	}
+
+	spin_unlock_irqrestore(&dev->feed_lock, flags);
 }
 
 
@@ -36,8 +41,6 @@ int get_slot(struct dicedev_device *dev) {
 			}
 		}
 	}
-
-	printk(KERN_ERR "get_slot: %d\n", slot);
 
 	return slot;
 }

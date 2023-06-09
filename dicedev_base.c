@@ -52,7 +52,7 @@ static int dicedev_release(struct inode *inode, struct file *filp) {
 	unsigned long flags;
 
 	/* Mark all buffers as destroyed */
-	spin_lock_irqsave(&dev->slock, flags); /* This lock is to ensure safe buff->destroyed read on buffer close */
+	spin_lock_irqsave(&dev->slock, flags); /* This lock is to ensure safe buff->destroyed read on buffer operations */
 	spin_lock_irqsave(&ctx->slock, flags); /* This lock is to make sure that no new tasks
  * 						  are added after the buffer is destroyed */
 	list_for_each(lh, &ctx->allocated_buffers) {
@@ -68,7 +68,7 @@ static int dicedev_release(struct inode *inode, struct file *filp) {
 		wait_event_interruptible(ctx->wq, ctx->task_count == 0);
 	}
 
-	/* Free all buffers */
+	/* Close all allocated buffers */
 	list_for_each_safe(lh, tmp, &ctx->allocated_buffers) {
 		struct dicedev_buffer *buff = container_of(lh, struct dicedev_buffer, context_buffers);
 
@@ -108,11 +108,6 @@ static long dicedev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg
 {
 	struct dicedev_context *ctx = filp->private_data;
 
-	if (!ctx) {
-		printk(KERN_ERR "dicedev_ioctl: invalid context\n");
-		return -EINVAL;
-	}
-
 	switch (cmd) {
 	case DICEDEV_IOCTL_CREATE_SET:
 		return dicedev_ioctl_create_set(ctx, arg);
@@ -147,21 +142,19 @@ static long dicedev_ioctl_create_set(struct dicedev_context *ctx, unsigned long 
 	struct dicedev_ioctl_create_set cs;
 	struct dicedev_buffer *buff;
 	int err;
+	int fd;
 
 	if (copy_from_user(&cs, argp, sizeof(struct dicedev_ioctl_create_set))) {
-		printk(KERN_ERR "dicedev_ioctl_create_set: failed to copy from user\n");
 		err = -EFAULT;
 		goto error;
 	}
 
 	if (cs.size < 0 || cs.size > DICEDEV_MAX_BUFFER_SIZE) {
-		printk(KERN_ERR "dicedev_ioctl_create_set: invalid size\n");
 		err = -EINVAL;
 		goto error;
 	}
 
 	if (cs.allowed > DICEDEV_MAX_ALLOWED) {
-		printk(KERN_ERR "dicedev_ioctl_create_set: invalid allowed\n");
 		err = -EINVAL;
 		goto error;
 	}
@@ -169,20 +162,27 @@ static long dicedev_ioctl_create_set(struct dicedev_context *ctx, unsigned long 
 	buff = kzalloc(sizeof(struct dicedev_buffer), GFP_KERNEL);
 
 	if (!buff) {
-		printk(KERN_ERR "dicedev_ioctl_create_set: failed to allocate buffer\n");
 		err = -ENOMEM;
 		goto error;
 	}
 
 	if (dicedev_buffer_init(ctx, buff, cs.size, cs.allowed) < 0) {
-		printk(KERN_ERR "dicedev_ioctl_create_set: failed to initialize buffer\n");
 		err = -ENOMEM;
 		goto err_buff;
 	}
 
+	if ((err = dicedev_buffer_get_fd(buff)) < 0) {
+		goto err_fd;
+	}
+
+	fd = err;
+
 	list_add(&buff->context_buffers, &ctx->allocated_buffers);
 
-	return dicedev_buffer_get_fd(buff);
+	return fd;
+
+err_fd:
+	dicedev_buffer_destroy(buff);
 
 err_buff:
 	kfree(buff);
@@ -196,7 +196,6 @@ static long dicedev_ioctl_run(struct dicedev_context *ctx, unsigned long arg) {
 	char __user *argp = (char __user *)arg;
 	struct dicedev_ioctl_run rCmd;
 	struct dicedev_buffer *cBuff, *dBuff;
-	struct dicedev_device *dev;
 	struct dicedev_task *task;
 	unsigned long flags;
 
@@ -205,26 +204,24 @@ static long dicedev_ioctl_run(struct dicedev_context *ctx, unsigned long arg) {
 	}
 
 	if (rCmd.addr % 4 !=  0 || rCmd.size % 4 != 0) {
-		printk(KERN_ERR "dicedev_ioctl_run: invalid addr or size\n");
 		return -EINVAL;
 	}
 
 	cBuff = fdget(rCmd.cfd).file->private_data;
 	dBuff = fdget(rCmd.bfd).file->private_data;
-	dev = ctx->dev;
 
 	if (cBuff == NULL || dBuff == NULL) {
-		printk(KERN_ERR "dicedev_ioctl_run: invalid file descriptor\n");
+//		printk(KERN_ERR "dicedev_ioctl_run: invalid file descriptor\n");
 		return -EINVAL;
 	}
 
 	if ((uint64_t)rCmd.addr + (uint64_t) rCmd.size > cBuff->pt->max_size) {
-		printk(KERN_ERR "dicedev_ioctl_run: buffer is not large enough to perform this operation.\n");
+//		printk(KERN_ERR "dicedev_ioctl_run: buffer is not large enough to perform this operation.\n");
 		return -EINVAL;
 	}
 
-	if (cBuff->ctx->dev != dev || dBuff->ctx->dev != dev) {
-		printk(KERN_ERR "dicedev_ioctl_run: invalid device buffer\n");
+	if (cBuff->ctx != ctx || dBuff->ctx != ctx) {
+//		printk(KERN_ERR "dicedev_ioctl_run: buffers not created by this context\n");
 		return -EINVAL;
 	}
 
@@ -329,73 +326,15 @@ static irqreturn_t dicedev_isr(int irq, void *opaque)
 		dicedev_iow(dev, DICEDEV_INTR, istatus);
 
 		if (istatus & (DICEDEV_INTR_CMD_ERROR | DICEDEV_INTR_MEM_ERROR)) {
-			struct list_head *lh;
-			struct dicedev_task *task;
-
-			BUG_ON(list_empty(&dev->wt.running_tasks));
-
-			lh = dev->wt.running_tasks.next;
-			task = container_of(lh, struct dicedev_task, lh);
-
-		    	dicedev_ctx_fail(task->ctx);
+			BUG_ON(dev->wt.running_task == NULL);
+			dicedev_ctx_fail(dev->wt.running_task->ctx);
 		}
 
 		if (istatus & DICEDEV_INTR_FENCE_WAIT) {
-			BUG_ON(list_empty(&dev->wt.running_tasks));
+			BUG_ON(dev->wt.running_task == NULL);
 
 			dev->fence_state = DICEDEV_FENCE_STATE_REACHED;
-			wake_up_interruptible(&dev->wt.task_cond);
-			printk(KERN_INFO "dicedev_isr: fence reached\n");
-//
-////			BUG_ON(list_empty(&dev->wt.running_tasks));
-//
-//			dev->fence.reached = true;
-//			wake_up_interruptible(&dev->wt.task_cond);
-
-//			lh = dev->wt.running_tasks.next;
-//			list_del(lh);
-//			task = container_of(lh, struct dicedev_task, lh);
-//			task->ctx->task_count--;
-//			task->buff_out->reader.result_count += task->result_count;
-//			wake_up_interruptible(&task->ctx->wq);
-//
-//			if (task->type == DICEDEV_TASK_TYPE_RUN) {
-//				unbind_slot(dev, task->buff_out);
-//				wake_up_interruptible(&dev->wt.slot_cond);
-//			}
-//
-//			kfree(task);
-//
-//			read_fence_count = dicedev_ior(dev, DICEDEV_CMD_FENCE_LAST);
-//
-//			dicedev_iow(dev, DICEDEV_CMD_FENCE_WAIT, (read_fence_count + 1) % DICEDEV_MAX_FENCE_VAL);
-
-//			printk(KERN_ERR "dicedev_isr: read_fence_count = %d\n", read_fence_count);
-//			printk(KERN_ERR "dicedev_isr: dev->fence.last_handled = %d\n", dev->fence.last_handled);
-//			printk(KERN_ERR "dicedev_isr: will wait for fence %d\n", (read_fence_count + 1) % DICEDEV_MAX_FENCE_VAL);
-
-//			if (read_fence_count - dev->fence.last_handled > 1) {
-//				printk(KERN_ERR "dicedev_isr: must handle %d fences\n", read_fence_count - dev->fence.last_handled);
-//			}
-//
-//			for (i = dev->fence.last_handled; i != read_fence_count; i = (i + 1) % DICEDEV_MAX_FENCE_VAL) {
-//				lh = dev->wt.running_tasks.next;
-//				list_del(lh);
-//				task = container_of(lh, struct dicedev_task, lh);
-//				task->ctx->task_count--;
-//				task->buff_out->reader.result_count += task->result_count;
-//				wake_up_interruptible(&task->ctx->wq);
-//
-//				if (task->type == DICEDEV_TASK_TYPE_RUN) {
-//					unbind_slot(dev, task->buff_out);
-//					wake_up_interruptible(&dev->wt.slot_cond);
-//				}
-//
-//				kfree(task);
-//			}
-
-//			dev->fence.last_handled = read_fence_count;
-
+			wake_up_interruptible(&dev->wt.event_cond);
 		}
 
 		if (istatus & DICEDEV_INTR_FEED_ERROR) {
@@ -424,9 +363,6 @@ static struct pci_device_id dicedev_pci_ids[] = {
 static int dicedev_probe(struct pci_dev *pdev, const struct pci_device_id *pci_id)
 {
 	int err, i;
-	const uint32_t enabled_intr =
-		DICEDEV_INTR_FENCE_WAIT | DICEDEV_INTR_FEED_ERROR |
-		DICEDEV_INTR_CMD_ERROR | DICEDEV_INTR_MEM_ERROR | DICEDEV_INTR_SLOT_ERROR;
 
 	/* Allocate device structure */
 	struct dicedev_device *dev = kzalloc(sizeof(struct dicedev_device), GFP_KERNEL);
@@ -438,12 +374,11 @@ static int dicedev_probe(struct pci_dev *pdev, const struct pci_device_id *pci_i
 	pci_set_drvdata(pdev, dev);
 	dev->pdev = pdev;
 
+	/* Locks etc. */
 	spin_lock_init(&dev->slock);
-	dev->free_slots = DICEDEV_NUM_SLOTS;
-	dev->fence.count = 0;
-	dev->fence.last_handled = 0;
-	dev->fence.queued = false;
+	spin_lock_init(&dev->feed_lock);
 
+	/* Allocate a free index. */
 	mutex_lock(&dicedev_devices_lock);
 	for (i = 0; i < DICEDEV_MAX_DEVICES; i++) {
 		if (!dicedev_devices[i]) {
@@ -459,6 +394,7 @@ static int dicedev_probe(struct pci_dev *pdev, const struct pci_device_id *pci_i
 	dev->idx = i;
 	mutex_unlock(&dicedev_devices_lock);
 
+	/* Enable hardware resources */
 	if ((err = pci_enable_device(pdev))) {
 		goto err_enable_dev;
 	}
@@ -484,13 +420,26 @@ static int dicedev_probe(struct pci_dev *pdev, const struct pci_device_id *pci_i
 		goto err_request_irq;
 	}
 
+
+	/* Initialize device defaults */
+	dev->fence_state = DICEDEV_FENCE_STATE_NONE;
+	dev->failed = false;
+
+	for (i = 0; i < DICEDEV_NUM_SLOTS; i++) {
+		dev->buff_slots[i] = NULL;
+	}
+
+	dev->free_slots = DICEDEV_NUM_SLOTS;
+
 	dicedev_wt_init(dev);
 
-	dicedev_iow(dev, DICEDEV_ENABLE, 1);
-	dicedev_iow(dev, DICEDEV_INTR, enabled_intr);
-	dicedev_iow(dev, DICEDEV_INTR_ENABLE, enabled_intr);
+	dicedev_iow(dev, DICEDEV_INTR, DICEDEV_ALL_INTR);
+	dicedev_iow(dev, DICEDEV_INTR_ENABLE, DICEDEV_ACTIVE_INTR);
 	dicedev_iow(dev, DICEDEV_CMD_FENCE_WAIT, 1);
 	dicedev_iow(dev, DICEDEV_CMD_FENCE_LAST, 0);
+	dicedev_iow(dev, DICEDEV_ENABLE, 1);
+
+	/* Device is running now. */
 
 	for (i = 0; i < DICEDEV_NUM_SLOTS; i++) {
 		uint32_t cmd;
@@ -512,12 +461,14 @@ static int dicedev_probe(struct pci_dev *pdev, const struct pci_device_id *pci_i
 	if (IS_ERR(dev->dev)) {
 		printk(KERN_ERR "dicedev: device_create failed\n");
 		dev->dev = 0;
+		goto err_dev_create;
 	}
 
 	return 0;
 
-
+err_dev_create:
 err_cdev_add:
+	dicedev_iow(dev, DICEDEV_ENABLE, 0);
 	dicedev_iow(dev, DICEDEV_INTR_ENABLE, 0);
 	free_irq(pdev->irq, dev);
 err_request_irq:
@@ -544,7 +495,15 @@ static void dicedev_remove(struct pci_dev *pdev) {
 		device_destroy(&dicedev_class, dicedev_devno + dev->idx);
 	}
 	cdev_del(&dev->cdev);
+
+	printk(KERN_ERR "dicedev: removing device %d\n", dev->idx);
+
 	dicedev_iow(dev, DICEDEV_INTR_ENABLE, 0);
+	printk(KERN_ERR "dicedev: waiting for worker thread to finish\n");
+	kthread_stop(dev->wt.thread);
+	printk(KERN_ERR "dicedev: worker thread finished\n");
+	dicedev_iow(dev, DICEDEV_ENABLE, 0);
+
 	free_irq(pdev->irq, dev);
 	pci_iounmap(pdev, dev->bar);
 	pci_release_regions(pdev);
@@ -559,27 +518,18 @@ static void dicedev_remove(struct pci_dev *pdev) {
 static int dicedev_suspend(struct pci_dev *pdev, pm_message_t state) {
 	struct dicedev_device *dev = pci_get_drvdata(pdev);
 	dicedev_iow(dev, DICEDEV_INTR_ENABLE, 0);
-	dicedev_iow(dev, DICEDEV_INTR, 0);
-	free_irq(pdev->irq, dev);
-	pci_disable_device(pdev);
+	kthread_park(dev->wt.thread);
+	dicedev_iow(dev, DICEDEV_ENABLE, 0);
 	return 0;
 }
 
 
 static int dicedev_resume(struct pci_dev *pdev) {
 	struct dicedev_device *dev = pci_get_drvdata(pdev);
+	kthread_unpark(dev->wt.thread);
 
-	dicedev_iow(dev, DICEDEV_INTR, DICEDEV_INTR_FENCE_WAIT
-					       | DICEDEV_INTR_FEED_ERROR
-					       | DICEDEV_INTR_CMD_ERROR
-					       | DICEDEV_INTR_MEM_ERROR
-					       | DICEDEV_INTR_SLOT_ERROR);
-	dicedev_iow(dev, DICEDEV_INTR_ENABLE, DICEDEV_INTR_FENCE_WAIT
-						      | DICEDEV_INTR_FEED_ERROR
-						      | DICEDEV_INTR_CMD_ERROR
-						      | DICEDEV_INTR_MEM_ERROR
-						      | DICEDEV_INTR_SLOT_ERROR);
-
+	dicedev_iow(dev, DICEDEV_INTR_ENABLE, DICEDEV_ACTIVE_INTR);
+	dicedev_iow(dev, DICEDEV_ENABLE, 1);
 	return 0;
 }
 
