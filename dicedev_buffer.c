@@ -58,7 +58,7 @@ static ssize_t dicedev_buffer_write(struct file *filp, const char __user *buf, s
 	ssize_t err;
 	struct dicedev_task *task;
 	uint32_t *cmd;
-	unsigned long flags, flags2;
+	unsigned long flags;
 
 	if (count % 4 != 0) {
 		err = -EINVAL;
@@ -73,13 +73,13 @@ static ssize_t dicedev_buffer_write(struct file *filp, const char __user *buf, s
 		goto err;
 	}
 
-	spin_lock_irqsave(&buff->ctx->slock, flags2);
+//	spin_lock_irqsave(&buff->ctx->slock, flags2);
 
 	ctx = buff->ctx;
 	ctx->task_count++;
 
 	spin_unlock_irqrestore(&buff->dev->slock, flags);
-	spin_unlock_irqrestore(&buff->ctx->slock, flags2);
+//	spin_unlock_irqrestore(&buff->ctx->slock, flags2);
 
 	cmd = kmalloc(count, GFP_KERNEL);
 
@@ -117,10 +117,10 @@ static ssize_t dicedev_buffer_write(struct file *filp, const char __user *buf, s
 err_copy:
 	kfree(cmd);
 err_task:
-	spin_lock_irqsave(&ctx->slock, flags);
+	spin_lock_irqsave(&buff->dev->slock, flags);
 	ctx->task_count--;
 	wake_up_interruptible(&task->ctx->wq);
-	spin_unlock_irqrestore(&ctx->slock, flags);
+	spin_unlock_irqrestore(&buff->dev->slock, flags);
 err:
 	return err;
 }
@@ -147,7 +147,6 @@ static int __buff_read_result(struct dicedev_buffer *buffer, struct dice *res) {
 
 static ssize_t dicedev_buffer_read(struct file *filp, char __user *buff, size_t count, loff_t *offp) {
 	struct dicedev_buffer *res_buff = filp->private_data;
-	struct dicedev_context *ctx = res_buff->ctx;
 	struct dice result;
 	unsigned long flags;
 
@@ -156,31 +155,32 @@ static ssize_t dicedev_buffer_read(struct file *filp, char __user *buff, size_t 
 		return -EINVAL;
 	}
 
-	spin_lock_irqsave(&ctx->slock, flags);
-	while (READS_AVAILABLE(res_buff->reader) == 0 && ctx->task_count > 0) {
-		spin_unlock_irqrestore(&ctx->slock, flags);
-		wait_event_interruptible(ctx->wq, READS_AVAILABLE(res_buff->reader) > 0 || ctx->task_count == 0);
-		spin_lock_irqsave(&ctx->slock, flags);
+	spin_lock_irqsave(&res_buff->dev->slock, flags);
+	while (READS_AVAILABLE(res_buff->reader) == 0 && !res_buff->destroyed && res_buff->ctx->task_count > 0) {
+		spin_unlock_irqrestore(&res_buff->dev->slock, flags);
+		wait_event_interruptible(res_buff->ctx->wq, READS_AVAILABLE(res_buff->reader) > 0 || res_buff->destroyed || res_buff->ctx->task_count == 0);
+		spin_lock_irqsave(&res_buff->dev->slock, flags);
 	}
 
 	if (READS_AVAILABLE(res_buff->reader) == 0) {
 		printk(KERN_ERR "dicedev_buffer_read: no reads available\n");
-		spin_unlock_irqrestore(&ctx->slock, flags);
+		spin_unlock_irqrestore(&res_buff->dev->slock, flags);
 		return 0;
 	}
 
 	if (__buff_read_result(res_buff, &result)) {
-		spin_unlock_irqrestore(&ctx->slock, flags);
+		spin_unlock_irqrestore(&res_buff->dev->slock, flags);
 		printk(KERN_ERR "dicedev_buffer_read: failed to read result\n");
 		return -EFAULT;
 	}
 
 	if (copy_to_user(buff, &result, sizeof(struct dice))) {
+		spin_unlock_irqrestore(&res_buff->dev->slock, flags);
 		printk(KERN_ERR "dicedev_buffer_read: failed to copy to user\n");
 		return -EFAULT;
 	}
 
-	spin_unlock_irqrestore(&ctx->slock, flags);
+	spin_unlock_irqrestore(&res_buff->dev->slock, flags);
 
 	return sizeof(struct dice);
 }

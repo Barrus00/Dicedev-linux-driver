@@ -53,14 +53,14 @@ static int dicedev_release(struct inode *inode, struct file *filp) {
 
 	/* Mark all buffers as destroyed */
 	spin_lock_irqsave(&dev->slock, flags); /* This lock is to ensure safe buff->destroyed read on buffer operations */
-	spin_lock_irqsave(&ctx->slock, flags); /* This lock is to make sure that no new tasks
- * 						  are added after the buffer is destroyed */
+//	spin_lock_irqsave(&ctx->slock, flags); /* This lock is to make sure that no new tasks
+// * 						  are added after the buffer is destroyed */
 	list_for_each(lh, &ctx->allocated_buffers) {
 		struct dicedev_buffer *buff = container_of(lh, struct dicedev_buffer, context_buffers);
 
 		buff->destroyed = true;
 	}
-	spin_unlock_irqrestore(&ctx->slock, flags);
+//	spin_unlock_irqrestore(&ctx->slock, flags);
 	spin_unlock_irqrestore(&dev->slock, flags);
 
 	/* Wait for all tasks to finish */
@@ -235,11 +235,11 @@ static long dicedev_ioctl_run(struct dicedev_context *ctx, unsigned long arg) {
 		return -ENOMEM;
 	}
 
-	spin_lock_irqsave(&ctx->slock, flags);
+	spin_lock_irqsave(&dBuff->dev->slock, flags);
 	/* We dont have to perform safe task add procedure as in buffer_write,
 	 * as there's no way to call ioctl when releasing context */
 	ctx->task_count++;
-	spin_unlock_irqrestore(&ctx->slock, flags);
+	spin_unlock_irqrestore(&dBuff->dev->slock, flags);
 
 	task->type = DICEDEV_TASK_TYPE_RUN;
 	task->ctx = ctx;
@@ -260,25 +260,24 @@ static long dicedev_ioctl_run(struct dicedev_context *ctx, unsigned long arg) {
 static long dicedev_ioctl_wait(struct dicedev_context *ctx, unsigned long arg) {
 	char __user *argp = (char __user *)arg;
 	struct dicedev_ioctl_wait wCmd;
-	unsigned long flags;
 
 	if (copy_from_user(&wCmd, argp, sizeof(struct dicedev_ioctl_wait))) {
 		return -EFAULT;
 	}
 
-	spin_lock_irqsave(&ctx->slock, flags);
+//	spin_lock_irqsave(&ctx->slock, flags);
 	while (wCmd.cnt < ctx->task_count) {
-		spin_unlock_irqrestore(&ctx->slock, flags);
+//		spin_unlock_irqrestore(&ctx->slock, flags);
 		wait_event_interruptible(ctx->wq, wCmd.cnt >= ctx->task_count);
-		spin_lock_irqsave(&ctx->slock, flags);
+//		spin_lock_irqsave(&ctx->slock, flags);
 	}
 
 	if (ctx->failed) {
-		spin_unlock_irqrestore(&ctx->slock, flags);
+//		spin_unlock_irqrestore(&ctx->slock, flags);
 		return -EIO;
 	}
 
-	spin_unlock_irqrestore(&ctx->slock, flags);
+//	spin_unlock_irqrestore(&ctx->slock, flags);
 	return 0;
 }
 
