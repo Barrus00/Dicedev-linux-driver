@@ -13,11 +13,11 @@ int do_open(char *path) {
 }
 
 int do_open0() {
-	return do_open("/dev/dice0");
+	return do_open("/dev/dicedev0");
 }
 
 int do_open1() {
-	return do_open("/dev/dice1");
+	return do_open("/dev/dicedev1");
 }
 
 int do_create_buf(int fd, int size, uint64_t allowed) {

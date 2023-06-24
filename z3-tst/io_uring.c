@@ -45,18 +45,23 @@ int main()
 	buf[3] = 0x20;
 
 	io_uring_prep_write(sqe, bfd, &buf[0], sizeof(uint32_t) * 2, 0);
+//	fprintf(stderr, "write prepared\n");
 	sqe->flags |= IOSQE_IO_LINK;
 	sqe = io_uring_get_sqe(&ring);
 	if (!sqe) {	syserr("sqe"); }
 
 	io_uring_prep_write(sqe, bfd, &buf[2], sizeof(uint32_t) * 2, 0);
+//	fprintf(stderr, "write prepared2\n");
 	sqe = io_uring_get_sqe(&ring);
 	if (!sqe) {	syserr("sqe"); }
 
 	io_uring_prep_close(sqe, bfd);
+//	fprintf(stderr, "close prepared\n");
 	io_uring_submit(&ring);
-
+	fprintf(stderr, "submitted\n");
 	for (int i = 0; i < 3; i++) {
+		fprintf(stderr, "waiting %d\n", i);
+
 		if (io_uring_wait_cqe(&ring, &cqe) < 0)
 		{
 			syserr("wait_cqe");
@@ -68,7 +73,10 @@ int main()
 		io_uring_cqe_seen(&ring, cqe);
 	}
 
+//	fprintf(stderr, "done\n");
+
 	do_wait(fd, 0);
+//	fprintf(stderr, "waited\n");
 
 	struct dice * buf_read = (struct dice *) buffer;
 	assert(buf_read[7].value == 5 && buf_read[7].type == 5);

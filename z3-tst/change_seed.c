@@ -41,7 +41,7 @@ int main()
 		do_run(fd, bfd, 0x1000, sizeof(uint32_t) * 4, bfd);
 		do_wait(fd, 0);
 
-		struct dice * buf_read = (struct dice *) buffe	r;
+		struct dice * buf_read = (struct dice *) buffer;
 
 		assert(buf_read[7].value == 2 && buf_read[7].type == 5);
 

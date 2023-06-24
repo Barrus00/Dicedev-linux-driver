@@ -9,7 +9,7 @@ io_uring_read:
 	$(CC) io_uring_read.c -luring -o io_uring_read
 
 $(TESTS): %: %.o
-	$(CC) -std=c11 -Wall -o $@ $< 
+	$(CC) -O0 -ggdb -std=c11 -Wall -o $@ $< 
 
 clean:
 	rm -f $(TESTS) io_uring io_uring_read *.o

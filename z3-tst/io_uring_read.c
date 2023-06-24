@@ -65,7 +65,7 @@ int main()
 		}
 		io_uring_cqe_seen(&ring, cqe);
 	}
-
+	
 	struct dice d;
 
 	for (int i = 0; i < 3; ++i)
@@ -97,4 +97,5 @@ int main()
 
 	do_munmap(buffer, SIZE - 0x1000);
 	do_close(fd);
+	printf("all ok!\n");
 }

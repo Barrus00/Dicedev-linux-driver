@@ -26,7 +26,7 @@ int main() {
 	uint32_t *cmd = (uint32_t*) (buffer + 0x1000);
 	cmd[0] = DICEDEV_USER_CMD_GET_DIE_HEADER(5000, FAIR);
 
-	md[1] = 0x20;
+	cmd[1] = 0x20;
 	cmd[2] = DICEDEV_USER_CMD_GET_DIE_HEADER(5000, FAIR);
 	cmd[3] = 0x20;
 	cmd[4] = DICEDEV_USER_CMD_GET_DIE_HEADER(5000, FAIR);
