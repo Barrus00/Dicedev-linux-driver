@@ -5,6 +5,7 @@
 
 #define READS_AVAILABLE(reader) (reader.result_count - reader.offset)
 
+
 void dicedev_buffer_init_reader(struct dicedev_buffer *buff) {
 	BUG_ON(!buff);
 
@@ -73,13 +74,11 @@ static ssize_t dicedev_buffer_write(struct file *filp, const char __user *buf, s
 		goto err;
 	}
 
-//	spin_lock_irqsave(&buff->ctx->slock, flags2);
 
 	ctx = buff->ctx;
 	ctx->task_count++;
 
 	spin_unlock_irqrestore(&buff->dev->slock, flags);
-//	spin_unlock_irqrestore(&buff->ctx->slock, flags2);
 
 	cmd = kmalloc(count, GFP_KERNEL);
 
@@ -163,7 +162,6 @@ static ssize_t dicedev_buffer_read(struct file *filp, char __user *buff, size_t 
 	}
 
 	if (READS_AVAILABLE(res_buff->reader) == 0) {
-		printk(KERN_ERR "dicedev_buffer_read: no reads available\n");
 		spin_unlock_irqrestore(&res_buff->dev->slock, flags);
 		return 0;
 	}
@@ -289,7 +287,6 @@ error:
 void dicedev_buffer_destroy(struct dicedev_buffer *buff) {
 	unsigned long flags;
 
-	dicedev_pt_free(buff->dev->pdev, buff->pt);
 	spin_lock_irqsave(&buff->dev->slock, flags);
 
 	if (buff->binded_slot != DICEDEV_BUFFER_NO_SLOT) {
@@ -297,6 +294,9 @@ void dicedev_buffer_destroy(struct dicedev_buffer *buff) {
 	}
 
 	spin_unlock_irqrestore(&buff->dev->slock, flags);
+
+	dicedev_pt_free(buff->dev->pdev, buff->pt);
+
 	kfree(buff->pt);
 }
 

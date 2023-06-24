@@ -83,6 +83,7 @@ void unbind_slot(struct dicedev_device *dev, struct dicedev_buffer *buff) {
 
 void restart_device(struct dicedev_device *dev) {
 	dicedev_iow(dev, DICEDEV_ENABLE, 0);
+	dicedev_iow(dev, DICEDEV_INTR_ENABLE, 0);
 	dicedev_iow(dev, DICEDEV_INTR, DICEDEV_ACTIVE_INTR);
 	dicedev_iow(dev, DICEDEV_INTR_ENABLE, DICEDEV_ACTIVE_INTR);
 	dicedev_iow(dev, DICEDEV_ENABLE, 1);

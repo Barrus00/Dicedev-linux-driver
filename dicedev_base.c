@@ -7,9 +7,8 @@
 #include "dicedev_buffer.h"
 #include "dicedev_wt.h"
 
-#define DICEDEV_DEV_NAME "dice"
 #define DICEDEV_MAX_DEVICES 256
-#define DICEDEV_MAX_BUFFER_SIZE (1 << 20)
+#define DICEDEV_MAX_BUFFER_SIZE (DICEDEV_PAGE_SIZE * 1024)
 
 #define DICEDEV_MAX_ALLOWED (((uint64_t) 1 << 33) - 1)
 
@@ -53,14 +52,11 @@ static int dicedev_release(struct inode *inode, struct file *filp) {
 
 	/* Mark all buffers as destroyed */
 	spin_lock_irqsave(&dev->slock, flags); /* This lock is to ensure safe buff->destroyed read on buffer operations */
-//	spin_lock_irqsave(&ctx->slock, flags); /* This lock is to make sure that no new tasks
-// * 						  are added after the buffer is destroyed */
 	list_for_each(lh, &ctx->allocated_buffers) {
 		struct dicedev_buffer *buff = container_of(lh, struct dicedev_buffer, context_buffers);
 
 		buff->destroyed = true;
 	}
-//	spin_unlock_irqrestore(&ctx->slock, flags);
 	spin_unlock_irqrestore(&dev->slock, flags);
 
 	/* Wait for all tasks to finish */
@@ -211,17 +207,14 @@ static long dicedev_ioctl_run(struct dicedev_context *ctx, unsigned long arg) {
 	dBuff = fdget(rCmd.bfd).file->private_data;
 
 	if (cBuff == NULL || dBuff == NULL) {
-//		printk(KERN_ERR "dicedev_ioctl_run: invalid file descriptor\n");
 		return -EINVAL;
 	}
 
 	if ((uint64_t)rCmd.addr + (uint64_t) rCmd.size > cBuff->pt->max_size) {
-//		printk(KERN_ERR "dicedev_ioctl_run: buffer is not large enough to perform this operation.\n");
 		return -EINVAL;
 	}
 
 	if (cBuff->ctx != ctx || dBuff->ctx != ctx) {
-//		printk(KERN_ERR "dicedev_ioctl_run: buffers not created by this context\n");
 		return -EINVAL;
 	}
 
@@ -265,19 +258,14 @@ static long dicedev_ioctl_wait(struct dicedev_context *ctx, unsigned long arg) {
 		return -EFAULT;
 	}
 
-//	spin_lock_irqsave(&ctx->slock, flags);
 	while (wCmd.cnt < ctx->task_count) {
-//		spin_unlock_irqrestore(&ctx->slock, flags);
 		wait_event_interruptible(ctx->wq, wCmd.cnt >= ctx->task_count);
-//		spin_lock_irqsave(&ctx->slock, flags);
 	}
 
 	if (ctx->failed) {
-//		spin_unlock_irqrestore(&ctx->slock, flags);
 		return -EIO;
 	}
 
-//	spin_unlock_irqrestore(&ctx->slock, flags);
 	return 0;
 }
 
@@ -335,16 +323,6 @@ static irqreturn_t dicedev_isr(int irq, void *opaque)
 			dev->fence_state = DICEDEV_FENCE_STATE_REACHED;
 			wake_up_interruptible(&dev->wt.event_cond);
 		}
-
-		if (istatus & DICEDEV_INTR_FEED_ERROR) {
-			// TODO: Propably nothing, and should simply disable this interrupt.
-		}
-
-		if (istatus & DICEDEV_INTR_SLOT_ERROR) {
-			printk(KERN_ERR "dicedev_isr: slot error interrupt\n");
-		}
-
-		BUG_ON(istatus & DICEDEV_INTR_SLOT_ERROR);
 	}
 
 	spin_unlock_irqrestore(&dev->slock, flags);
@@ -432,11 +410,11 @@ static int dicedev_probe(struct pci_dev *pdev, const struct pci_device_id *pci_i
 
 	dicedev_wt_init(dev);
 
-	dicedev_iow(dev, DICEDEV_INTR, DICEDEV_ALL_INTR);
-	dicedev_iow(dev, DICEDEV_INTR_ENABLE, DICEDEV_ACTIVE_INTR);
-	dicedev_iow(dev, DICEDEV_CMD_FENCE_WAIT, 1);
+	dicedev_iow(dev, DICEDEV_INTR, DICEDEV_ALL_INTR); /* Clear interrupts */
+	dicedev_iow(dev, DICEDEV_INTR_ENABLE, DICEDEV_ACTIVE_INTR); /* Enable interrupts */
+	dicedev_iow(dev, DICEDEV_CMD_FENCE_WAIT, 1); /* Init fence */
 	dicedev_iow(dev, DICEDEV_CMD_FENCE_LAST, 0);
-	dicedev_iow(dev, DICEDEV_ENABLE, 1);
+	dicedev_iow(dev, DICEDEV_ENABLE, 1); /* Enable device */
 
 	/* Device is running now. */
 
@@ -455,7 +433,7 @@ static int dicedev_probe(struct pci_dev *pdev, const struct pci_device_id *pci_i
 
 	dev->dev = device_create(&dicedev_class,
 				 &dev->pdev->dev, dicedev_devno + dev->idx, dev,
-				 "dicedev%d", dev->idx);
+				 "dice%d", dev->idx);
 
 	if (IS_ERR(dev->dev)) {
 		printk(KERN_ERR "dicedev: device_create failed\n");
@@ -495,12 +473,8 @@ static void dicedev_remove(struct pci_dev *pdev) {
 	}
 	cdev_del(&dev->cdev);
 
-	printk(KERN_ERR "dicedev: removing device %d\n", dev->idx);
-
 	dicedev_iow(dev, DICEDEV_INTR_ENABLE, 0);
-	printk(KERN_ERR "dicedev: waiting for worker thread to finish\n");
 	kthread_stop(dev->wt.thread);
-	printk(KERN_ERR "dicedev: worker thread finished\n");
 	dicedev_iow(dev, DICEDEV_ENABLE, 0);
 
 	free_irq(pdev->irq, dev);

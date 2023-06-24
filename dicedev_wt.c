@@ -80,6 +80,18 @@ static void dicedev_task_init_it(struct dicedev_task *task) {
 }
 
 
+static int numbers_of_bits_set(uint32_t i)
+{
+	/* Source:
+	 * https://stackoverflow.com/questions/109023/count-the-number-of-set-bits-in-a-32-bit-integer
+	 */
+	i = i - ((i >> 1) & 0x55555555);        // add pairs of bits
+	i = (i & 0x33333333) + ((i >> 2) & 0x33333333);  // quads
+	i = (i + (i >> 4)) & 0x0F0F0F0F;        // groups of 8
+	return (i * 0x01010101) >> 24;          // horizontal sum of bytes
+}
+
+
 static void __wt_run_task(struct dicedev_task *task) {
 	struct dicedev_context *ctx = task->ctx;
 	struct dicedev_device *dev = ctx->dev;
@@ -99,11 +111,9 @@ static void __wt_run_task(struct dicedev_task *task) {
 
 		switch (cmd[0] & DICEDEV_CMD_TYPE_MASK) {
 		case DICEDEV_USER_CMD_TYPE_NOP:
-//			printk(KERN_ERR "NOP\n");
 			bytes_left -= 4;
 			break;
 		case DICEDEV_USER_CMD_TYPE_GET_DIE:
-//			printk(KERN_ERR "GET_DIE\n");
 			if (bytes_left < 4) {
 				goto err_ctx_fail;
 			}
@@ -120,23 +130,18 @@ static void __wt_run_task(struct dicedev_task *task) {
 
 			res_count = cmd[0] & GET_DIE_NUM_MASK;
 
-			task->result_count += cmd[0] & GET_DIE_NUM_MASK;
+			/* Dice device always produce num * (number of allowed dices) results */
+			res_count *= numbers_of_bits_set(cmd[1]);
 
-			if (task->result_count >= buff_out->pt->max_size) {
-				printk(KERN_ERR "Result count %d overflow\n", (int)task->result_count);
-				printk(KERN_ERR "Max size %d\n", (int)buff_out->pt->max_size);
-				printk(KERN_ERR "Result count overflow\n");
-				goto err_ctx_fail;
-			}
+			task->result_count += cmd[0] & GET_DIE_NUM_MASK;
 
 			cmd[0] |= buff_out->binded_slot << 24;
 
-			feed_cmd(dev, cmd, 2); /* TODO: zbadac czy feed bez locka nie bedzie problematyczny */
+			feed_cmd(dev, cmd, 2);
 
 			bytes_left -= 8;
 			break;
 		case DICEDEV_USER_CMD_TYPE_NEW_SET:
-//			printk(KERN_ERR "NEW_SET\n");
 			if ((cmd[0] & NEW_SET_SLOT_MASK) != 0) {
 				goto err_ctx_fail;
 			}
@@ -152,8 +157,6 @@ static void __wt_run_task(struct dicedev_task *task) {
 		}
 	}
 
-//	printk(KERN_ERR "Task sent\n");
-
 	return;
 
 err_ctx_fail:
@@ -162,46 +165,6 @@ err_ctx_fail:
 
 	return;
 }
-
-
-//static inline void __update_done_tasks(struct dicedev_device *dev) {
-//	struct dicedev_task *task;
-//	struct list_head *lh;
-//	uint32_t last_fence = dev->fence.last_handled;
-//	uint32_t current_fence;
-//	unsigned long flags;
-//
-//	spin_lock_irqsave(&dev->slock, flags);
-//	dev->fence.reached = false;
-//
-//	current_fence = dicedev_ior(dev, DICEDEV_CMD_FENCE_LAST);
-//
-//	while (last_fence != current_fence) {
-////		printk("TASK DONE!\n");
-//		lh = dev->wt.running_tasks.next;
-//		list_del(lh);
-//		task = container_of(lh, struct dicedev_task, lh);
-//		spin_lock_irqsave(&task->ctx->slock, flags);
-//		task->ctx->task_count--;
-//		task->buff_out->reader.result_count += task->result_count;
-//
-//		spin_unlock_irqrestore(&task->ctx->slock, flags);
-//		wake_up_interruptible(&task->ctx->wq);
-//
-//		printk(KERN_ERR "Task done for buffer %p\n", task->buff_out);
-//
-//		if (task->type == DICEDEV_TASK_TYPE_RUN) {
-//			unbind_slot(dev, task->buff_out);
-//		}
-//		kfree(task);
-//
-//		last_fence = (last_fence + 1) % DICEDEV_MAX_FENCE_VAL;
-//	}
-//
-//	dev->fence.last_handled = last_fence;
-//
-//	spin_unlock_irqrestore(&dev->slock, flags);
-//}
 
 
 enum wt_event {
@@ -333,9 +296,6 @@ static int dicedev_wt_fn(void *data) {
 			dicedev_buffer_init_reader(task->buff_out);
 			spin_unlock_irqrestore(&dev->slock, flags);
 
-//			spin_lock_irqsave(&task->ctx->slock, flags);
-//			dicedev_buffer_init_reader(task->buff_out);
-//			spin_unlock_irqrestore(&task->ctx->slock, flags);
 			break;
 
 		case WT_EVENT_TASK_RUN:
